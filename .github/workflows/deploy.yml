@@ -44,7 +44,7 @@ jobs:
             -x "assets/tiles/svg/*"
 
       - name: Build web version with love.js
-        run: love.js game.love dist --title "Mahjong Roguelike" --compatibility --memory 512
+        run: love.js game.love dist --title "Mahjong Roguelike" --compatibility
 
       - uses: actions/configure-pages@v4
 
