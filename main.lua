@@ -1,4 +1,4 @@
-﻿require("src/tiles")
+require("src/tiles")
 require("src/deck")
 require("src/hand")
 require("src/sets")
