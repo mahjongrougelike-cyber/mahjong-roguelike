@@ -46,6 +46,9 @@ jobs:
       - name: Build web version with love.js
         run: love.js game.love dist --title "Mahjong Roguelike" --compatibility
 
+      - name: Ensure game.love is in dist
+        run: cp game.love dist/game.love
+
       - uses: actions/configure-pages@v4
 
       - uses: actions/upload-pages-artifact@v3
