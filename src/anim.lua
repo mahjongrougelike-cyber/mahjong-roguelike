@@ -6,6 +6,10 @@ local _flashIdx   = nil   -- hand index of the just-arrived tile
 local _flashT     = 0     -- 1 → 0 over 0.55 s
 local _playFlash  = 0     -- 1 → 0 over ~0.28 s (set-played glow)
 
+-- Shadow animation for Yīn Shén: "shuffle" (purple ripple) or "reveal" (soft glow)
+local _shadowAnim = 0     -- 1 → 0 over ~0.55 s
+local _shadowType = nil   -- "shuffle" | "reveal"
+
 -- Screen shake: trauma decays, magnitude scales with trauma^2
 local _shakeTrauma = 0
 local _shakePhase  = 0    -- phase accumulator for oscillation
@@ -23,6 +27,8 @@ function initAnim()
     _shakePhase   = 0
     _shakeX       = 0
     _shakeY       = 0
+    _shadowAnim   = 0
+    _shadowType   = nil
 end
 
 function updateAnim(dt)
@@ -47,6 +53,11 @@ function updateAnim(dt)
 
     -- Play-set flash
     _playFlash = math.max(0, _playFlash - dt * 3.6)
+
+    -- Shadow animation decay
+    if _shadowAnim > 0 then
+        _shadowAnim = math.max(0, _shadowAnim - dt * 1.8)
+    end
 
     -- Screen shake: decay trauma, compute offsets via layered sine waves
     if _shakeTrauma > 0 then
@@ -91,9 +102,15 @@ function triggerShake(trauma)
     _shakeTrauma = math.min(1, _shakeTrauma + trauma)
 end
 
+function triggerShadowAnim(animType)
+    _shadowAnim = 1.0
+    _shadowType = animType
+end
+
 -- ── Accessors ─────────────────────────────────────────────────────────────────
-function getDrawAnim()   return _drawAnim        end
-function getFlashIdx()   return _flashIdx        end
-function getFlashT()     return _flashT          end
-function getPlayFlash()  return _playFlash       end
-function getShakeOffset() return _shakeX, _shakeY end
+function getDrawAnim()    return _drawAnim              end
+function getFlashIdx()    return _flashIdx              end
+function getFlashT()      return _flashT                end
+function getPlayFlash()   return _playFlash             end
+function getShakeOffset() return _shakeX, _shakeY      end
+function getShadowAnim()  return _shadowAnim, _shadowType end

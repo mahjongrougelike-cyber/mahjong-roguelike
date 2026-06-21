@@ -30,10 +30,12 @@ local ACT_ENEMIES = {
         easy = {
             { create = createWindSpirit },
             { create = createGaunxi },
+            { create = createYinShen },
             { create = createWindSpirit },
             { create = createGaunxi },
+            { create = createYinShen },
         },
-        hard  = { { create = createWindSpirit } },
+        hard  = { { create = createTieNiu }, { create = createCan }, { create = createWindSpirit } },
         elite = { { create = createXi } },
         boss  =   { create = createWindSpirit },
     },
@@ -64,6 +66,15 @@ local currentAct  = 1
 -- ── Generation ────────────────────────────────────────────────────────────────
 
 local function pickOne(pool) return pool[math.random(#pool)] end
+
+local function pickOneAvoid(pool, last)
+    if #pool <= 1 or last == nil then return pickOne(pool) end
+    local filtered = {}
+    for _, v in ipairs(pool) do
+        if v ~= last then table.insert(filtered, v) end
+    end
+    return #filtered > 0 and filtered[math.random(#filtered)] or pickOne(pool)
+end
 local function worldX(floor) return WORLD_X0 + floor * FLOOR_SPACING end
 
 local function shuffle(t)
@@ -116,6 +127,7 @@ function generateMap()
     }}
 
     local act = ACT_ENEMIES[math.min(currentAct, MAX_ACTS)]
+    local lastEasy, lastHard, lastElite = nil, nil, nil
     for f = 1, MAX_CONTENT do
         mapGrid[f] = {}
         local pool = {unpack(TEMPLATES[f] or {"combat","combat","rest"})}
@@ -134,10 +146,16 @@ function generateMap()
                 col         = c,
             }
             if nodeType == "combat" then
-                local ePool = (f <= 2) and act.easy or act.hard
-                node.enemyDef = pickOne(ePool)
+                if f <= 2 then
+                    node.enemyDef = pickOneAvoid(act.easy, lastEasy)
+                    lastEasy = node.enemyDef
+                else
+                    node.enemyDef = pickOneAvoid(act.hard, lastHard)
+                    lastHard = node.enemyDef
+                end
             elseif nodeType == "elite" then
-                node.enemyDef = pickOne(act.elite)
+                node.enemyDef = pickOneAvoid(act.elite, lastElite)
+                lastElite = node.enemyDef
             end
             mapGrid[f][c] = node
             -- Companion Tiānshǐ node: hidden above each Jiangshi node; revealed on refuse

@@ -146,6 +146,104 @@ function createGaunxi()
     return e
 end
 
+-- ── Tiě Niú (Iron Ox) cycle intent builder ───────────────────────────────────
+
+local function buildTieNiuIntent(e, intentType)
+    if intentType == "attack" then
+        return { type = "attack_single", damage = 5 + e.strength }
+    else -- "draw_strengthen"
+        return { type = "draw_strengthen" }
+    end
+end
+
+function createTieNiu()
+    local e = {
+        name          = "Tiě Niú",
+        hp            = 80,
+        maxHp         = 80,
+        hand          = {},
+        revealedMelds = {},
+        discards      = {},
+        minAtk        = 0,
+        maxAtk        = 0,
+        shield        = 0,
+        strength      = 0,
+        cycle         = { "draw_strengthen", "draw_strengthen", "attack",
+                          "draw_strengthen", "draw_strengthen", "draw_strengthen", "attack" },
+        cycleIndex    = 3,
+        buildIntent   = buildTieNiuIntent,
+    }
+    e.intent     = buildTieNiuIntent(e, e.cycle[1])
+    e.nextIntent = buildTieNiuIntent(e, e.cycle[2])
+    return e
+end
+
+-- ── Yīn Shén (Shadow) cycle intent builder ───────────────────────────────────
+
+local function buildYinShenIntent(e, intentType)
+    if intentType == "yin_attack" then
+        return { type = "yin_attack" }
+    elseif intentType == "yin_shadow" then
+        return { type = "yin_shadow" }
+    else -- "yin_draw"
+        return { type = "yin_draw" }
+    end
+end
+
+function createYinShen()
+    local e = {
+        name          = "Yīn Shén",
+        hp            = 70,
+        maxHp         = 70,
+        hand          = {},
+        revealedMelds = {},
+        discards      = {},
+        minAtk        = 0,
+        maxAtk        = 0,
+        shield        = 0,
+        strength      = 0,
+        cycle         = { "yin_shadow", "yin_attack", "yin_draw" },
+        cycleIndex    = 3,
+        buildIntent   = buildYinShenIntent,
+    }
+    e.intent     = buildYinShenIntent(e, e.cycle[1])
+    e.nextIntent = buildYinShenIntent(e, e.cycle[2])
+    return e
+end
+
+-- ── Cán (Silkworm) cycle intent builder ──────────────────────────────────────
+
+local function buildCanIntent(e, intentType)
+    if intentType == "draw_lg" then
+        return { type = "can_draw_lg", shield = 12 }
+    else -- "draw_sm" or nil (wraps correctly for 2-slot cycle)
+        return { type = "can_draw_sm", shield = 10 }
+    end
+end
+
+function createCan()
+    local e = {
+        name         = "Cán",
+        hp           = 100,
+        maxHp        = 100,
+        hand         = {},
+        revealedMelds = {},
+        discards     = {},
+        minAtk       = 0,
+        maxAtk       = 0,
+        shield       = 0,
+        strength     = 0,
+        meldsPlayed  = 0,
+        smartDiscard = true,
+        cycle        = { "draw_sm", "draw_lg" },
+        cycleIndex   = 3,
+        buildIntent  = buildCanIntent,
+    }
+    e.intent     = buildCanIntent(e, e.cycle[1])
+    e.nextIntent = buildCanIntent(e, e.cycle[2])
+    return e
+end
+
 function createWindSpirit()
     local e = {
         name          = "Wind Spirit",
@@ -166,6 +264,38 @@ function createWindSpirit()
     e.intent     = buildWindSpiritIntent(e, e.cycle[1])
     e.nextIntent = buildWindSpiritIntent(e, e.cycle[2])
     return e
+end
+
+-- ── Auto-meld helper (used by Cán) ───────────────────────────────────────────
+
+local function autoPlayMelds(enemy)
+    local played = 0
+    local changed = true
+    while changed do
+        changed = false
+        local groups = {}
+        for i, tile in ipairs(enemy.hand) do
+            local key = tile.suit .. "|" .. (tile.value or tile.label or "")
+            if not groups[key] then groups[key] = {} end
+            table.insert(groups[key], i)
+        end
+        for _, idxList in pairs(groups) do
+            if #idxList >= 3 then
+                local sorted = { idxList[1], idxList[2], idxList[3] }
+                table.sort(sorted, function(a, b) return a > b end)
+                local meldTiles = {}
+                for _, idx in ipairs(sorted) do
+                    table.insert(meldTiles, 1, table.remove(enemy.hand, idx))
+                end
+                table.insert(enemy.revealedMelds, { tiles = meldTiles, type = "pung" })
+                enemy.meldsPlayed = (enemy.meldsPlayed or 0) + 1
+                played  = played + 1
+                changed = true
+                break
+            end
+        end
+    end
+    return played
 end
 
 -- ── Shared combat functions ───────────────────────────────────────────────────
@@ -193,6 +323,7 @@ function enemyExecuteIntent(enemy, drawPile)
         hits     = 1,
         count    = 0,
         amount   = 0,
+        melds    = 0,
     }
 
     local bonus = enemy.attackBonus or 0
@@ -226,6 +357,60 @@ function enemyExecuteIntent(enemy, drawPile)
             table.insert(enemy.hand, table.remove(drawPile, 1))
             enemy.shield = (enemy.shield or 0) + 10
         end
+    elseif intent.type == "draw_strengthen" then
+        if #drawPile > 0 then
+            table.insert(enemy.hand, table.remove(drawPile, 1))
+        end
+        enemy.strength = enemy.strength + 3
+    elseif intent.type == "yin_attack" then
+        result.damage = 7 + (enemy.strength or 0)
+    elseif intent.type == "yin_draw" then
+        if #drawPile > 0 then
+            table.insert(enemy.hand, table.remove(drawPile, 1))
+        end
+    elseif intent.type == "yin_shadow" then
+        local topN = math.min(10, #drawPile)
+        local beneficial = 0
+        for i = 1, topN do
+            for _, ht in ipairs(enemy.hand) do
+                if sameSetIdentity(drawPile[i], ht) then
+                    beneficial = beneficial + 1
+                    break
+                end
+            end
+        end
+        if beneficial < 3 then
+            -- top tiles aren't useful — shuffle hoping for better
+            for i = #drawPile, 2, -1 do
+                local j = math.random(i)
+                drawPile[i], drawPile[j] = drawPile[j], drawPile[i]
+            end
+            result.shuffled = true
+        else
+            -- good tiles incoming — keep them and reveal to player
+            result.shuffled     = false
+            result.revealTiles  = {}
+            for i = 1, topN do result.revealTiles[i] = drawPile[i] end
+        end
+    elseif intent.type == "can_draw_sm" then
+        if #drawPile > 0 then
+            table.insert(enemy.hand, table.remove(drawPile, 1))
+        end
+        enemy.shield  = (enemy.shield or 0) + (intent.shield or 10)
+        result.count  = 1
+        result.amount = intent.shield or 10
+        result.melds  = autoPlayMelds(enemy)
+    elseif intent.type == "can_draw_lg" then
+        local count = 2 + (enemy.meldsPlayed or 0)
+        for _ = 1, count do
+            if #drawPile > 0 then
+                table.insert(enemy.hand, table.remove(drawPile, 1))
+            end
+        end
+        enemy.shield  = (enemy.shield or 0) + (intent.shield or 12)
+        result.count  = count
+        result.amount = intent.shield or 12
+        result.melds  = autoPlayMelds(enemy)
     elseif intent.type == "draw2" then
         for _ = 1, 2 do
             if #drawPile > 0 then
@@ -281,12 +466,23 @@ local function scoreTile(tile, hand)
     return score
 end
 
-function enemyDiscard(enemy)
+local function scoreAvoidance(tile, playerHand)
+    local matches = 0
+    for _, pt in ipairs(playerHand) do
+        if sameSetIdentity(tile, pt) then matches = matches + 1 end
+    end
+    if matches >= 2 then return 10 end  -- would complete player's pung
+    if matches == 1 then return 3  end  -- might help player's pair
+    return 0
+end
+
+function enemyDiscard(enemy, playerHand)
     if #enemy.hand == 0 then return end
     local minScore = math.huge
     local minIdx   = 1
     for i, tile in ipairs(enemy.hand) do
         local s = scoreTile(tile, enemy.hand)
+        if playerHand then s = s + scoreAvoidance(tile, playerHand) end
         if s < minScore then
             minScore = s
             minIdx   = i
@@ -356,6 +552,19 @@ local function drawIntent(intent, x, y, e)
     elseif t == "replace" then
         love.graphics.setColor(0.46, 0.76, 0.68)
         love.graphics.print("[REP]  Swap a tile", x, y)
+    elseif t == "yin_attack" or t == "yin_draw" or t == "yin_shadow" then
+        love.graphics.setColor(0.40, 0.28, 0.58, 0.90)
+        love.graphics.print("[???]  Unknown", x, y)
+    elseif t == "can_draw_sm" then
+        love.graphics.setColor(0.55, 0.80, 0.62)
+        love.graphics.print("[DRW]  Draw + Fortify", x, y)
+    elseif t == "can_draw_lg" then
+        local mPlayed = (e and e.meldsPlayed or 0)
+        love.graphics.setColor(0.55, 0.80, 0.62)
+        love.graphics.print("[DRW]  Draw " .. (2 + mPlayed) .. " + Fortify", x, y)
+    elseif t == "draw_strengthen" then
+        love.graphics.setColor(0.92, 0.56, 0.18)
+        love.graphics.print("[DRW]  Draw + Strengthen", x, y)
     elseif t == "draw2" then
         love.graphics.setColor(0.30, 0.76, 0.46)
         love.graphics.print("[DRW]  Draw 2 tiles", x, y)

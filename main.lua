@@ -40,6 +40,10 @@ local scrySelected  = {}
 local scryUsedThisTurn = false
 local scryPending   = false
 
+local yinRevealMode  = false   -- true while showing Yīn Shén's wall reveal overlay
+local yinRevealTiles = {}      -- top-10 tiles to display
+local yinRevealTimer = 0       -- auto-dismiss countdown (seconds)
+
 -- ── Combat constants (modify here to tune baseline stats) ────────────────────
 local BASE_MAX_HP   = 100   -- player HP before item bonuses
 local BASE_MAX_MANA = 100   -- player MP before item bonuses
@@ -297,17 +301,22 @@ local function awardEncounterWin(message)
     if message then combatLog = message end
 end
 
+local function allPlayedAreKongs()
+    for _, meld in ipairs(playerRevealedMelds) do
+        if meld.type ~= "kong" then return false end
+    end
+    return true
+end
+
 local function checkPlayerMahjong()
     if encounterWon then return true end
     local needMelds = math.max(0, 4 - playedMeldsCount)
-    local won
-    if needMelds == 0 then
-        -- All melds played — any pair in the remaining hand wins
-        won = canCompleteWithPlayedAllowingLeftovers(playerHand, 0)
-    else
-        won = canCompleteWithPlayed(playerHand, needMelds)
+    -- Special case: 3 kongs = 12 tiles, same total as 4 pungs — pair in hand wins.
+    if needMelds == 1 and playedMeldsCount == 3 and allPlayedAreKongs() then
+        needMelds = 0
     end
-    if won then
+    -- Strict: hand must be exactly needMelds*3+2 tiles (melds + one pair, no leftovers).
+    if canCompleteWithPlayed(playerHand, needMelds) then
         winningHand = {}
         for _, meld in ipairs(playerRevealedMelds) do
             for _, t in ipairs(meld.tiles) do table.insert(winningHand, t) end
@@ -342,7 +351,7 @@ local function enemyDiscardIfReady()
     local discarded = false
     while enemy and #enemy.hand >= enemyReadyHandSize() do
         if checkEnemyMahjong() then return discarded end
-        enemyDiscard(enemy)
+        enemyDiscard(enemy, enemy.smartDiscard and playerHand or nil)
         claimableDiscard = enemy.discards[#enemy.discards]
         discarded = true
     end
@@ -534,6 +543,9 @@ local function startEncounterFromDef(def, nodeType)
     scrySelected         = {}
     scryUsedThisTurn     = false
     scryPending          = false
+    yinRevealMode        = false
+    yinRevealTiles       = {}
+    yinRevealTimer       = 0
     autumnShieldActive   = false
     mult.damage = 1
     mult.block  = 1
@@ -723,7 +735,7 @@ local function processBurstDiscard()
         return
     end
 
-    enemyDiscard(enemy)
+    enemyDiscard(enemy, enemy.smartDiscard and playerHand or nil)
     claimableDiscard = enemy.discards[#enemy.discards]
 
     if canClaimTile(claimableDiscard, playerHand, ITEM_FLAGS) then
@@ -909,33 +921,50 @@ end
 function love.load()
     math.randomseed(os.time())
 
-    -- Global fonts used by tilerender, hand, enemy, and love.draw
+    -- Global fonts — default fallbacks first
     FONT_TILENUM = love.graphics.newFont(24)
     FONT_TITLE   = love.graphics.newFont(16)
     FONT_UI      = love.graphics.newFont(13)
     FONT_SMALL   = love.graphics.newFont(10)
-    -- Try to load a CJK font for Chinese character tiles (Windows system fonts)
-    local function _tryAbsFont(path, size)
+    FONT_CJK       = nil
+    FONT_CJK_SMALL = nil
+
+    -- Load a Unicode font (CJK + extended Latin diacritics) from Windows system fonts.
+    -- If found, upgrade ALL UI fonts so names like "Tiě Niú" render correctly.
+    local function _loadFileData(path)
         local ok, fh = pcall(io.open, path, "rb")
         if not ok or not fh then return nil end
         local data = fh:read("*a"); fh:close()
         if not data or #data == 0 then return nil end
         local ok2, fd = pcall(love.filesystem.newFileData, data, "cjk.ttc")
-        if not ok2 or not fd then return nil end
-        local ok3, f = pcall(love.graphics.newFont, fd, size)
-        return ok3 and f or nil
+        return ok2 and fd or nil
     end
-    local _cjkPaths = {
+    local function _fontFrom(fd, size)
+        if not fd then return nil end
+        local ok, f = pcall(love.graphics.newFont, fd, size)
+        return ok and f or nil
+    end
+    for _, p in ipairs({
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simsun.ttc",
         "C:/Windows/Fonts/simhei.ttf",
-    }
-    FONT_CJK       = nil
-    FONT_CJK_SMALL = nil
-    for _, p in ipairs(_cjkPaths) do
-        if not FONT_CJK       then FONT_CJK       = _tryAbsFont(p, 24) end
-        if not FONT_CJK_SMALL then FONT_CJK_SMALL = _tryAbsFont(p, 13) end
-        if FONT_CJK and FONT_CJK_SMALL then break end
+    }) do
+        local fd = _loadFileData(p)
+        if fd then
+            local f10 = _fontFrom(fd, 10)
+            local f13 = _fontFrom(fd, 13)
+            local f16 = _fontFrom(fd, 16)
+            local f24 = _fontFrom(fd, 24)
+            if f24 then
+                FONT_CJK       = f24
+                FONT_CJK_SMALL = f13
+                if f10 then FONT_SMALL   = f10 end
+                if f13 then FONT_UI      = f13 end
+                if f16 then FONT_TITLE   = f16 end
+                FONT_TILENUM = f24
+                break
+            end
+        end
     end
     if not FONT_CJK       then FONT_CJK       = FONT_TILENUM end
     if not FONT_CJK_SMALL then FONT_CJK_SMALL = FONT_SMALL   end
@@ -957,6 +986,10 @@ function love.update(dt)
     flux.update(dt)
     updateAtmosphere(dt)
     updateAnim(dt)
+    if yinRevealTimer > 0 then
+        yinRevealTimer = math.max(0, yinRevealTimer - dt)
+        if yinRevealTimer == 0 then yinRevealMode = false end
+    end
 end
 
 local function drawScryOverlay()
@@ -996,6 +1029,50 @@ local function drawScryOverlay()
     love.graphics.setColor(0.82, 0.86, 0.70)
     love.graphics.printf("Confirm", SCRY_CONFIRM_BTN.x, SCRY_CONFIRM_BTN.y + 7,
         SCRY_CONFIRM_BTN.w, "center")
+end
+
+function drawYinOverlays()
+    -- Shadow action animation (shuffle = purple ripple, reveal = soft blue glow)
+    local anim, animType = getShadowAnim()
+    if anim > 0 then
+        if animType == "shuffle" then
+            local alpha = anim * 0.55
+            local pulse = math.sin(anim * math.pi * 6) * 0.5 + 0.5
+            love.graphics.setColor(0.22, 0.08, 0.38, alpha * (0.6 + 0.4 * pulse))
+            love.graphics.rectangle("fill", 0, 0, 1280, 720)
+            love.graphics.setColor(0.60, 0.28, 0.88, alpha * pulse)
+            love.graphics.setLineWidth(3)
+            local r = 130 + pulse * 30
+            love.graphics.circle("line", 580, 355, r)
+            love.graphics.circle("line", 580, 355, r * 0.6)
+            love.graphics.setLineWidth(1)
+        else
+            love.graphics.setColor(0.70, 0.78, 1.0, anim * 0.35)
+            love.graphics.rectangle("fill", 0, 0, 1280, 720)
+        end
+    end
+    -- Wall reveal panel
+    if yinRevealMode and #yinRevealTiles > 0 then
+        love.graphics.setColor(0.56, 0.62, 0.88, 0.22)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+        local tw, th, gap = 52, 72, 10
+        local totalW = #yinRevealTiles * tw + math.max(0, #yinRevealTiles - 1) * gap
+        local panW   = totalW + 40
+        local panH   = th + 72
+        local panX   = 640 - panW / 2
+        local panY   = 290
+        drawUIPanel(panX, panY, panW, panH, 6)
+        love.graphics.setFont(FONT_TITLE)
+        love.graphics.setColor(0.72, 0.78, 1.0)
+        love.graphics.printf("The shadow parts — the wall is visible", panX, panY + 10, panW, "center")
+        local x0 = 640 - totalW / 2
+        for i, tile in ipairs(yinRevealTiles) do
+            drawMahjongTile(tile, x0 + (i-1)*(tw+gap), panY + 38, tw, th, false, false, false, false, 0)
+        end
+        love.graphics.setFont(FONT_SMALL)
+        love.graphics.setColor(0.55, 0.55, 0.72, 0.80)
+        love.graphics.printf("[SPACE] dismiss", panX, panY + panH - 18, panW, "center")
+    end
 end
 
 local function drawTooltipOverlay()
@@ -1285,13 +1362,11 @@ function love.draw()
                          or (ITEM_FLAGS.sharedPool and baseDrawCost * 2 or baseDrawCost)
     local canDraw      = playerMana >= drawCost and turnPhase == "player"
                          and not mustDiscard and not burstDiscardMode and not freeReplace.mode and not scryMode
+    local totalFree  = freeDrawsRemaining + itemFreeDraws + itemCombatFreeDraws
     local drawLabel
-    if useWindDraw then
-        drawLabel = "Draw (Wind x" .. freeDrawsRemaining .. ")"
-    elseif useItemDraw then
-        drawLabel = "Draw (Free x" .. (itemFreeDraws + itemCombatFreeDraws) .. ")"
-    elseif drawCost == 0 then
-        drawLabel = "Draw (Free)"
+    if drawCost == 0 then
+        local n = totalFree + (drawsThisTurn == 0 and 1 or 0)
+        drawLabel = n > 1 and ("Draw (x" .. n .. " Free)") or "Draw (Free)"
     else
         drawLabel = "Draw (" .. drawCost .. " MP)"
     end
@@ -1438,6 +1513,7 @@ function love.draw()
     love.graphics.pop()   -- end screen shake; overlays below are stable
 
     drawScryOverlay()
+    drawYinOverlays()
     drawTooltipOverlay()
 
     -- ── Items panel overlay (I key) ───────────────────────────────────────────
@@ -1880,6 +1956,10 @@ function love.keypressed(key)
     if key == "r" then
         love.event.quit("restart")
 
+    elseif yinRevealMode and key == "space" then
+        yinRevealMode  = false
+        yinRevealTimer = 0
+
     elseif gameState == "run_start" or gameState == "shop" or gameState == "item_reward" or gameState == "jiangshi" or gameState == "tianshi" then
         if key == "escape" then gameState = "map" end
 
@@ -2067,6 +2147,43 @@ function love.keypressed(key)
 
             elseif result.type == "replace" then
                 combatLog = eName .. " swaps a tile! (+10 block)"
+
+            elseif result.type == "yin_attack" then
+                local taken, absorbed = applySingleHit(result.damage)
+                if absorbed > 0 and taken == 0 then
+                    combatLog = eName .. " struck from the shadow for " .. result.damage .. " — fully blocked!"
+                    triggerShake(0.35)
+                elseif absorbed > 0 then
+                    combatLog = eName .. " struck from the shadow for " .. result.damage .. " — " .. absorbed .. " blocked, " .. taken .. " taken."
+                else
+                    combatLog = eName .. " struck from the shadow for " .. taken .. " damage!"
+                end
+                triggerShadowAnim("reveal")
+
+            elseif result.type == "yin_draw" then
+                combatLog = eName .. " moves unseen."
+                triggerShadowAnim("reveal")
+
+            elseif result.type == "yin_shadow" then
+                if result.shuffled then
+                    triggerShadowAnim("shuffle")
+                    combatLog = eName .. " churns the wall..."
+                else
+                    triggerShadowAnim("reveal")
+                    yinRevealMode  = true
+                    yinRevealTiles = result.revealTiles or {}
+                    yinRevealTimer = 4.0
+                    combatLog = eName .. " parts — the wall is briefly visible."
+                end
+
+            elseif result.type == "can_draw_sm" or result.type == "can_draw_lg" then
+                local msg = eName .. " draws " .. result.count .. " tile(s) and fortifies (+" .. result.amount .. " shield)"
+                if result.melds > 0 then
+                    msg = msg .. " — reveals " .. result.melds .. " meld(s)!"
+                else
+                    msg = msg .. "."
+                end
+                combatLog = msg
 
             elseif result.type == "draw2" then
                 combatLog = eName .. " draws two tiles!"
