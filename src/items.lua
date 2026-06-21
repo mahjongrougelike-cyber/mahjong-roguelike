@@ -76,6 +76,99 @@ M.ITEMS = {
         rarity = "rare",
         flags  = { revealEnemyHand = true },
     },
+    Forsaken_Knowledge = {
+        id     = "Forsaken_Knowledge",
+        name   = "Forsaken Knowledge",
+        desc   = "All tiles can be played individually or as pairs.",
+        source = "elite",
+        rarity = "rare",
+        flags  = { singlePlay = true, pairPlay = true },
+    },
+    Fortune_Cookie = {
+        id     = "Fortune_Cookie",
+        name   = "Fortune Cookie",
+        desc   = "Whenever you gain free draws, gain one extra free draw.",
+        source = "elite",
+        rarity = "uncommon",
+        flags  = { bonusFreeDrawOnGrant = true },
+    },
+    Ace_in_the_Sleeve = {
+        id     = "Ace_in_the_Sleeve",
+        name   = "Ace in the Sleeve",
+        desc   = "Hand size cap is increased by 2.",
+        source = "elite",
+        rarity = "uncommon",
+        flags  = { handCapBonus = 2 },
+    },
+    Glasswork_Alloy = {
+        id     = "Glasswork_Alloy",
+        name   = "Glasswork Alloy",
+        desc   = "The first time you draw each turn, Scry the top 3 tiles. Choose any to discard.",
+        source = "elite",
+        rarity = "rare",
+        flags  = { scryOnFirstDraw = true },
+    },
+    Panda_Express = {
+        id     = "Panda_Express",
+        name   = "Panda Express",
+        desc   = "Gain 24 Max HP.",
+        source = "shop",
+        rarity = "uncommon",
+        flags  = { maxHPBonus = 24 },
+    },
+    Cultivation_Manual = {
+        id     = "Cultivation_Manual",
+        name   = "Cultivation Manual",
+        desc   = "After each combat you win, gain +1 Mana at the start of each turn.",
+        source = "shop",
+        rarity = "rare",
+        flags  = { manaGrowthOnWin = 1 },
+    },
+    Snake_Eyes = {
+        id     = "Snake_Eyes",
+        name   = "Snake Eyes",
+        desc   = "At the start of each combat, roll 2 dice. Gain that many free draws.",
+        source = "shop",
+        rarity = "rare",
+        flags  = { diceRollFreeDraw = true },
+    },
+    Crimson_Mantle = {
+        id        = "Crimson_Mantle",
+        name      = "Crimson Mantle",
+        desc      = "At the start of each turn, lose 1 HP and gain 15 Block.",
+        cost_desc = "−1 Hand Size",
+        source    = "jiangshi",
+        rarity    = "uncommon",
+        flags     = { turnStartHPLoss = 1, turnStartBlock = 15, handCapBonus = -1 },
+    },
+    Furnace = {
+        id        = "Furnace",
+        name      = "Furnace",
+        desc      = "Whenever you discard a tile, it is also played for its suit effect.",
+        cost_desc = "−50% Max HP, −1 Hand Size",
+        source    = "jiangshi",
+        rarity    = "rare",
+        flags     = { discardAlsoPlays = true, maxHPMult = 0.5, handCapBonus = -1 },
+    },
+    Daoquie = {
+        id        = "Daoquie",
+        name      = "Dàoqiè",
+        desc      = "When replacing a tile, steal from the enemy's hand instead of the wall. Your replaced tile goes to the discard pile.",
+        cost_desc = "−50 Max Mana",
+        source    = "jiangshi",
+        rarity    = "rare",
+        flags     = { replaceStealFromEnemy = true, maxManaBonus = -50 },
+    },
+    Bloodletting = {
+        id        = "Bloodletting",
+        name      = "Bloodletting",
+        desc      = "At the start of your turn, gain Mana equal to the HP the enemy lost last turn.",
+        cost_desc = "Cannot gain free draws",
+        source    = "jiangshi",
+        rarity    = "rare",
+        flags     = { noFreeDraws = true, manaFromEnemyDamage = true },
+    },
+
 }
 
 -- All item IDs (sorted for determinism)
@@ -113,6 +206,8 @@ function M.computeFlags(ownedIds)
         extraFreeDraw = 0,
         -- turn-start mana regen
         turnManaBonus  = 0,
+        -- per-combat-win turn-start mana growth
+        manaGrowthOnWin = 0,
         -- flat damage on every set played
         setPlayDamage  = 0,
         -- gold-scaled combat-start free draws (Red Endless Knot)
@@ -120,8 +215,28 @@ function M.computeFlags(ownedIds)
         -- reveal enemy hand (Jade Eye)
         revealEnemyHand   = false,
         -- shared pool (Blood Pact)
-        sharedPool     = false,
-        sharedPoolSize = 0,
+        sharedPool        = false,
+        sharedPoolSize    = 0,
+        -- single tile play (Forsaken Knowledge)
+        singlePlay        = false,
+        -- Fortune Cookie: +1 draw whenever a free-draw grant happens
+        bonusFreeDrawOnGrant = false,
+        -- scry top 3 on first draw each turn (Glasswork Alloy)
+        scryOnFirstDraw   = false,
+        -- dice roll free draws at combat start (Snake Eyes)
+        diceRollFreeDraw  = false,
+        -- Crimson Mantle: HP lost and block gained at turn start
+        turnStartHPLoss   = 0,
+        turnStartBlock    = 0,
+        -- Furnace: discarded tiles trigger their suit effect
+        discardAlsoPlays  = false,
+        -- Furnace: multiplier on max HP (0.5 = half)
+        maxHPMult         = 1.0,
+        -- Dàoqiè: replace steals from enemy hand instead of the wall
+        replaceStealFromEnemy = false,
+        -- Bloodletting: no free draws; gain mana equal to enemy HP lost last turn
+        noFreeDraws           = false,
+        manaFromEnemyDamage   = false,
     }
     for _, id in ipairs(ownedIds) do
         local it = M.ITEMS[id]
@@ -143,6 +258,7 @@ end
 -- Mixed sets require their respective unlock flags.
 function M.canPlaySet(setInfo, flags)
     if not setInfo then return false end
+    if setInfo.type == "single" then return flags.singlePlay end
     if setInfo.type == "pair" then return flags.pairPlay end
     local mt = setInfo.mixedType
     if mt == "mixedPK"   then return flags.mixedPungKong end

@@ -10,28 +10,31 @@ local ROW_Y         = {190, 380, 570}
 -- ── Visual config ─────────────────────────────────────────────────────────────
 
 local NT = {
-    start  = {label="Start",  r=0.26, g=0.26, b=0.26},
-    combat = {label="Combat", r=0.68, g=0.12, b=0.12},
-    elite  = {label="Elite",  r=0.50, g=0.10, b=0.58},
-    rest   = {label="Rest",   r=0.10, g=0.46, b=0.16},
-    shop   = {label="Shop",   r=0.54, g=0.44, b=0.08},
-    boss   = {label="Boss",   r=0.82, g=0.14, b=0.08},
+    start    = {label="Start",    r=0.26, g=0.26, b=0.26},
+    combat   = {label="Combat",   r=0.68, g=0.12, b=0.12},
+    elite    = {label="Elite",    r=0.50, g=0.10, b=0.58},
+    rest     = {label="Rest",     r=0.10, g=0.46, b=0.16},
+    shop     = {label="Shop",     r=0.54, g=0.44, b=0.08},
+    boss     = {label="Boss",     r=0.82, g=0.14, b=0.08},
+    jiangshi = {label="Jiangshi", r=0.72, g=0.08, b=0.28},
+    tianshi  = {label="Tiānshǐ",  r=0.90, g=0.84, b=0.38},
 }
 
 -- ── Enemy pools ───────────────────────────────────────────────────────────────
 -- Each act has easy (first 2 combats), hard (remaining combats), elite, and boss.
 
--- Enemy pools — populated as enemies are designed.
--- All unfinished slots use Wind Spirit as a placeholder.
+-- Enemy pools — add new enemies here as they are designed.
+-- Unfinished slots use Wind Spirit as a stand-in.
 local ACT_ENEMIES = {
     [1] = {
         easy = {
             { create = createWindSpirit },
+            { create = createGaunxi },
             { create = createWindSpirit },
-            { create = createWindSpirit },
+            { create = createGaunxi },
         },
         hard  = { { create = createWindSpirit } },
-        elite = { { create = createWindSpirit } },
+        elite = { { create = createXi } },
         boss  =   { create = createWindSpirit },
     },
     [2] = {
@@ -74,16 +77,17 @@ local TEMPLATES = {
     [1]  = {"combat","combat","rest"},
     [2]  = {"combat","combat","shop"},
     [3]  = {"combat","elite","combat"},
-    [4]  = {"combat","rest","shop"},
+    [4]  = {"combat","jiangshi","shop"},
     [5]  = {"elite","combat","combat"},
     [6]  = {"combat","shop","rest"},
     [7]  = {"combat","elite","combat"},
     [8]  = {"elite","combat","shop"},
-    [9]  = {"combat","rest","combat"},
+    [9]  = {"combat","jiangshi","combat"},
     [10] = {"elite","combat","combat"},
 }
 
-local _cam = {x = 220}
+local _cam          = {x = 220}
+local companionGrid = {}   -- floor.."," ..col → hidden Tiānshǐ companion for each Jiangshi node
 
 local function camTargetX()
     return math.min(220, 300 - worldX(playerFloor))
@@ -94,8 +98,9 @@ local function panMapCam()
 end
 
 function generateMap()
-    mapGrid     = {}
-    playerFloor = 0
+    mapGrid       = {}
+    companionGrid = {}
+    playerFloor   = 0
     playerCol   = 1
     _cam.x      = camTargetX()
 
@@ -110,14 +115,16 @@ function generateMap()
         connections={}, visited=false, available=false, floor=bossFloor, col=1,
     }}
 
+    local act = ACT_ENEMIES[math.min(currentAct, MAX_ACTS)]
     for f = 1, MAX_CONTENT do
         mapGrid[f] = {}
         local pool = {unpack(TEMPLATES[f] or {"combat","combat","rest"})}
         shuffle(pool)
         for c = 1, 3 do
             local jit = (math.random() - 0.5) * 80
-            mapGrid[f][c] = {
-                type        = pool[c],
+            local nodeType = pool[c]
+            local node = {
+                type        = nodeType,
                 x           = worldX(f),
                 y           = ROW_Y[c] + jit,
                 connections = {},
@@ -126,8 +133,23 @@ function generateMap()
                 floor       = f,
                 col         = c,
             }
+            if nodeType == "combat" then
+                local ePool = (f <= 2) and act.easy or act.hard
+                node.enemyDef = pickOne(ePool)
+            elseif nodeType == "elite" then
+                node.enemyDef = pickOne(act.elite)
+            end
+            mapGrid[f][c] = node
+            -- Companion Tiānshǐ node: hidden above each Jiangshi node; revealed on refuse
+            if nodeType == "jiangshi" then
+                companionGrid[f .. "," .. c] = {
+                    type="tianshi", x=node.x, y=node.y - 56,
+                    visited=false, available=false, floor=f, col=c,
+                }
+            end
         end
     end
+    mapGrid[MAX_CONTENT + 1][1].enemyDef = act.boss
 
     for f = 1, MAX_CONTENT do
         local cur  = mapGrid[f]
@@ -206,25 +228,41 @@ function visitMapNode(floor, col)
     return node
 end
 
--- combatsCount: how many combat (non-elite) fights have started this act.
--- First 2 use easy pool; the rest use hard pool.
-function getNodeEnemyDef(node, combatsCount)
-    combatsCount = combatsCount or 0
-    local act = ACT_ENEMIES[math.min(currentAct, MAX_ACTS)]
-    if node.type == "combat" then
-        local pool = combatsCount < 2 and act.easy or act.hard
-        return pickOne(pool)
-    elseif node.type == "elite" then
-        return pickOne(act.elite)
-    elseif node.type == "boss" then
-        return act.boss
-    end
-    return nil
+-- Enemy def is pre-assigned at map generation time for seed consistency.
+function getNodeEnemyDef(node)
+    return node.enemyDef
 end
 
 function isMapComplete()  return playerFloor == MAX_CONTENT + 1 end
 function isRunComplete()  return currentAct > MAX_ACTS end
 function getCurrentAct()  return currentAct end
+
+-- Reveal the Tiānshǐ companion that sits above the Jiangshi node at (floor, col).
+function revealTianshiCompanion(floor, col)
+    local node = companionGrid[floor .. "," .. col]
+    if node then node.available = true end
+end
+
+-- Returns {floor, col} if the player clicked an available Tiānshǐ companion node.
+function getClickedTianshiNode(mx, my)
+    local offX = _cam.x
+    for _, node in pairs(companionGrid) do
+        if node.available and not node.visited then
+            local sx = node.x + offX
+            local dx, dy = mx - sx, my - node.y
+            if dx * dx + dy * dy < NR * NR then
+                return { floor = node.floor, col = node.col }
+            end
+        end
+    end
+    return nil
+end
+
+-- Mark the companion visited (next-floor unlocking was already done by the Jiangshi visitMapNode).
+function visitTianshiNode(floor, col)
+    local node = companionGrid[floor .. "," .. col]
+    if node then node.visited = true end
+end
 
 -- ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -298,6 +336,34 @@ local function drawIcon(ntype, x, y, alpha)
         love.graphics.setLineWidth(1.5)
         love.graphics.circle("line", x, y, 5)
         love.graphics.setLineWidth(1)
+
+    elseif ntype == "jiangshi" then
+        -- Coffin cross
+        love.graphics.setColor(0.82, 0.10, 0.30, alpha * 0.90)
+        love.graphics.setLineWidth(2.5)
+        love.graphics.line(x, y-9, x, y+8)
+        love.graphics.line(x-6, y-3, x+6, y-3)
+        love.graphics.setLineWidth(1)
+        -- blood drops
+        love.graphics.setColor(0.92, 0.18, 0.24, alpha * 0.72)
+        love.graphics.circle("fill", x-2.5, y+10, 1.8)
+        love.graphics.circle("fill", x+2.5, y+10, 1.8)
+
+    elseif ntype == "tianshi" then
+        -- Halo
+        love.graphics.setColor(1.0, 0.90, 0.40, alpha * 0.80)
+        love.graphics.setLineWidth(2)
+        love.graphics.circle("line", x, y-6, 5)
+        love.graphics.setLineWidth(1)
+        -- Wings (left arc + right arc)
+        love.graphics.setColor(0.96, 0.88, 0.56, alpha * 0.78)
+        love.graphics.setLineWidth(1.5)
+        love.graphics.arc("line", "open", x-4, y+2, 6, math.pi * 0.75, math.pi * 1.55)
+        love.graphics.arc("line", "open", x+4, y+2, 6, math.pi * 1.45, math.pi * 2.25)
+        love.graphics.setLineWidth(1)
+        -- Body dot
+        love.graphics.setColor(1.0, 0.94, 0.62, alpha * 0.90)
+        love.graphics.circle("fill", x, y+1, 3)
     end
 end
 
@@ -345,9 +411,10 @@ function drawMap(mx, my)
     local bossFloor = MAX_CONTENT + 1
 
     -- Connection lines
+    local EDGE_MARGIN = 30
     for f = 0, bossFloor do
         local floor = mapGrid[f]
-        if floor and f <= playerFloor + 2 then
+        if floor then
             for _, node in ipairs(floor) do
                 local nf   = f + 1
                 local next = mapGrid[nf]
@@ -355,23 +422,14 @@ function drawMap(mx, my)
                     for _, nc in ipairs(node.connections) do
                         local dest = next[nc]
                         if dest then
-                            local isFogTrail = (f == playerFloor + 2)
-                            if isFogTrail then
-                                love.graphics.setColor(0.32, 0.26, 0.12, 0.22)
-                                love.graphics.setLineWidth(1)
-                                dashedLine(node.x, node.y, dest.x, dest.y, 3, 10)
-                            else
-                                if node.visited and (dest.available or dest.visited) then
-                                    love.graphics.setColor(0.58, 0.46, 0.16, 0.84)
-                                elseif dest.available then
-                                    love.graphics.setColor(0.48, 0.58, 0.38, 0.66)
-                                else
-                                    love.graphics.setColor(0.24, 0.22, 0.18, 0.40)
-                                end
+                            local sx, dx = node.x + offX, dest.x + offX
+                            if sx >= EDGE_MARGIN and sx <= 1280 - EDGE_MARGIN
+                            and dx >= EDGE_MARGIN and dx <= 1280 - EDGE_MARGIN then
+                                love.graphics.setColor(0.44, 0.38, 0.22, 0.55)
                                 love.graphics.setLineWidth(1.5)
                                 dashedLine(node.x, node.y, dest.x, dest.y, 6, 4)
+                                love.graphics.setLineWidth(1)
                             end
-                            love.graphics.setLineWidth(1)
                         end
                     end
                 end
@@ -384,8 +442,7 @@ function drawMap(mx, my)
         local floor = mapGrid[f]
         if floor then
             for c, node in ipairs(floor) do
-                if f - playerFloor <= 2 then
-                    local key       = f .. "," .. c
+                local key       = f .. "," .. c
                     local reachable = reachSet[key]
                     local nt        = NT[node.type] or NT.combat
 
@@ -442,20 +499,84 @@ function drawMap(mx, my)
                         love.graphics.setColor(0.36, 0.34, 0.28)
                     end
                     love.graphics.printf(nt.label, node.x-36, node.y+R+4, 72, "center")
-                end
             end
+        end
+    end
+
+    -- Tiānshǐ companion nodes
+    for _, cnode in pairs(companionGrid) do
+        if cnode.available or cnode.visited then
+            local nt  = NT.tianshi
+            local dx  = worldMX - cnode.x
+            local dy  = my - cnode.y
+            local hovC = (not cnode.visited) and (dx*dx + dy*dy < NR*NR)
+            local R   = hovC and NR + 3 or NR
+
+            -- Dashed link from jiangshi to companion
+            local ji = mapGrid[cnode.floor] and mapGrid[cnode.floor][cnode.col]
+            if ji then
+                love.graphics.setColor(nt.r, nt.g, nt.b, 0.22)
+                love.graphics.setLineWidth(1)
+                dashedLine(ji.x, ji.y - NR, cnode.x, cnode.y + R, 3, 5)
+            end
+
+            love.graphics.setColor(0, 0, 0, 0.44)
+            love.graphics.circle("fill", cnode.x + 2, cnode.y + 3, R)
+
+            local dim = cnode.visited and 0.38 or (hovC and 1.0 or 0.88)
+            love.graphics.setColor(nt.r * dim, nt.g * dim, nt.b * dim)
+            love.graphics.circle("fill", cnode.x, cnode.y, R)
+
+            love.graphics.setColor(nt.r, nt.g, nt.b,
+                hovC and 1.0 or (cnode.visited and 0.44 or 0.70))
+            love.graphics.setLineWidth(hovC and 2.5 or 1.5)
+            love.graphics.circle("line", cnode.x, cnode.y, R)
+            love.graphics.setLineWidth(1)
+
+            drawIcon("tianshi", cnode.x, cnode.y, cnode.visited and 0.40 or 1.0)
+
+            love.graphics.setFont(FONT_SMALL)
+            if cnode.visited then
+                love.graphics.setColor(0.32, 0.30, 0.24)
+            elseif hovC then
+                love.graphics.setColor(1.0, 0.94, 0.56)
+            else
+                love.graphics.setColor(0.86, 0.76, 0.32)
+            end
+            love.graphics.printf(nt.label, cnode.x - 36, cnode.y + R + 4, 72, "center")
         end
     end
 
     love.graphics.pop()
 
+    -- Tiānshǐ companion hover tooltip
+    for _, cnode in pairs(companionGrid) do
+        if cnode.available and not cnode.visited then
+            local sx = cnode.x + offX
+            local dx, dy = mx - sx, my - cnode.y
+            if dx*dx + dy*dy < NR*NR then
+                local tx = math.max(4, math.min(1280 - 134, sx - 65))
+                local ty = cnode.y - NR - 30
+                love.graphics.setColor(0.04, 0.03, 0.02, 0.88)
+                love.graphics.rectangle("fill", tx, ty, 130, 22, 4, 4)
+                love.graphics.setColor(NT.tianshi.r, NT.tianshi.g, NT.tianshi.b, 0.56)
+                love.graphics.rectangle("line", tx, ty, 130, 22, 4, 4)
+                love.graphics.setFont(FONT_SMALL)
+                love.graphics.setColor(0.82, 0.80, 0.68)
+                love.graphics.printf("Heaven's grace", tx, ty + 6, 130, "center")
+                break
+            end
+        end
+    end
+
     -- Hover tooltip
     local tips = {
-        combat = "Fight a random enemy",
-        elite  = "Harder fight — greater reward",
-        rest   = "Recover 25% max HP",
-        shop   = "Gain 15 gold",
-        boss   = "Act " .. currentAct .. " boss",
+        combat   = "Fight a random enemy",
+        elite    = "Harder fight — greater reward",
+        rest     = "Recover 25% max HP",
+        shop     = "Spend gold on items",
+        boss     = "Act " .. currentAct .. " boss",
+        jiangshi = "Devil's bargain — items cost stats",
     }
     for _, r in ipairs(getReachableNodes()) do
         local node = mapGrid[r.floor] and mapGrid[r.floor][r.col]

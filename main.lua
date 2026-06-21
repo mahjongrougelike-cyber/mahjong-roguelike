@@ -30,9 +30,15 @@ local showItemsPanel      = false
 local playerRevealedMelds = {}
 local tileTooltip         = nil   -- tile object to show info for (right-click)
 local itemTooltip         = nil   -- item id to show info for (right-click)
+local enemyTooltip        = false -- enemy info popup toggle (right-click)
 local itemPanelRects      = {}    -- hit rects for left-column item list, rebuilt each frame
 local currentSet    = nil
 local currentEffect = nil
+local scryMode      = false
+local scryTiles     = {}
+local scrySelected  = {}
+local scryUsedThisTurn = false
+local scryPending   = false
 
 -- ── Combat constants (modify here to tune baseline stats) ────────────────────
 local BASE_MAX_HP   = 100   -- player HP before item bonuses
@@ -98,12 +104,48 @@ local function drawInfoPopup(px, py, lines, titleColor)
     end
 end
 
+local function getEnemyInfo(e)
+    if not e then return nil end
+    if e.name == "Xi" then
+        return {
+            "Xi",
+            "Rage: each tile you draw gives +1 damage to Xi's next attack.",
+            "Playing a set resets Rage.",
+            "Mostly attacks: 20 damage or 4x2 damage.",
+            "Draw action: draws 2 tiles, then discards with claim pauses.",
+        }
+    elseif e.name == "Wind Spirit" then
+        return {
+            "Wind Spirit",
+            "Attacks: 14 damage or 3x3 damage.",
+            "Block: gains 50 shield until its next turn.",
+            "Burst: draws 3 tiles, then discards with claim pauses.",
+            "Buff: gains +2 strength for future attacks.",
+        }
+    elseif e.name == "Gaunxi" then
+        return {
+            "Gaunxi",
+            "Draw Block: draws 1 tile and gains 10 block.",
+            "Attacks: 5 damage or 5x1 damage.",
+            "Burst: draws 3 tiles, then discards with claim pauses.",
+            "Replace: draws 1 tile, gains 10 block, then discards if over size.",
+        }
+    end
+    return {
+        e.name or "Enemy",
+        "Intent and next intent are shown in the enemy panel.",
+        "Enemy discards pause when you can claim a playable set.",
+    }
+end
+
 -- ── UI hit-rect buttons ───────────────────────────────────────────────────────
+DEV_SKIP_BTN = { x = 4, y = 4, w = 88, h = 20 }  -- global: no upvalue cost
 local SORT_BTN      = { x = 318, y = 541, w = 90,  h = 24 }
 local MANA_DRAW_BTN = { x = 416, y = 541, w = 128, h = 24 }
 local PLAY_SET_BTN  = { x = 552, y = 541, w = 108, h = 24 }
-local CLAIM_BTN     = { x = 668, y = 541, w = 114, h = 24 }
-local REPLACE_BTN   = { x = 790, y = 541, w = 115, h = 24 }
+local CLAIM_BTN     = { x = 834, y = 384, w = 90,  h = 22 }
+local REPLACE_BTN   = { x = 668, y = 541, w = 115, h = 24 }
+local SCRY_CONFIRM_BTN = { x = 578, y = 492, w = 124, h = 26 }
 
 local playerHP      = BASE_MAX_HP
 local playerMaxHP   = BASE_MAX_HP
@@ -123,6 +165,10 @@ local shopItemRects     = {}
 local shopExitBtn       = {}
 local itemRewardOffer   = {}
 local itemRewardRects   = {}
+
+-- Jiangshi node tracking (for companion reveal on refuse)
+local jiangshiNodeFloor = 0
+local jiangshiNodeCol   = 0
 local itemRewardSkipBtn = {}
 local runStartOffer     = {}   -- item IDs shown at the very start of a run
 local runStartRects     = {}
@@ -135,12 +181,15 @@ local drawsThisTurn = 0
 local gameOver         = false
 local encounterWon     = false
 local runComplete        = false
+winningHand      = {}   -- global: player's hand snapshot on Mahjong win (no upvalue cost)
+enemyWinningHand = {}   -- global: enemy's hand snapshot on enemy Mahjong (no upvalue cost)
 local gameState          = "map"   -- "map" | "combat" | "shop" | "item_reward" | "run_start"
 local currentNodeType    = "combat"
 local combatsThisAct     = 0   -- normal (non-elite) combat count this act; gates easy→hard pool
 local freeDrawsRemaining  = 0   -- free draws from Wind tile plays (accumulate between turns)
 local itemFreeDraws       = 0   -- free draws from items (reset to item value each turn)
 local itemCombatFreeDraws = 0   -- item-granted draws at combat start (persist until used)
+enemyDmgThisTurn = 0            -- global: enemy HP lost since last player turn start (Bloodletting)
 local skipNextEnemyTurn  = false
 local flowerReplaceMode  = false
 local springStealMode    = false
@@ -150,7 +199,29 @@ local autumnShieldActive = false
 local playedMeldsCount   = 0
 local claimableDiscard   = nil
 local burstDiscardMode   = false   -- true while stepping through enemy discards one-by-one
+local manaGrowthBonus    = 0
 local mult = { damage=1, block=1, mana=1 }
+
+local function addFortuneFreeDrawBonus(amount)
+    amount = amount or 0
+    if amount > 0 and ITEM_FLAGS.bonusFreeDrawOnGrant then
+        return amount + 1
+    end
+    return amount
+end
+
+local function notePlayerDrewTile()
+    if enemy and enemy.attackBonus ~= nil then
+        enemy.attackBonus = enemy.attackBonus + 1
+    end
+end
+
+local function findTileIndex(tile)
+    for i, t in ipairs(playerHand) do
+        if t == tile then return i end
+    end
+    return nil
+end
 
 -- Recompute ITEM_FLAGS from playerItems and update derived stats.
 -- Call whenever items change (purchase, game start).
@@ -165,7 +236,7 @@ local function applyItemFlags()
         playerMaxHP   = pool
         playerMaxMana = pool
     else
-        playerMaxHP   = BASE_MAX_HP   + (ITEM_FLAGS.maxHPBonus   or 0)
+        playerMaxHP   = math.floor((BASE_MAX_HP   + (ITEM_FLAGS.maxHPBonus   or 0)) * (ITEM_FLAGS.maxHPMult or 1.0))
         playerMaxMana = BASE_MAX_MANA + (ITEM_FLAGS.maxManaBonus or 0)
     end
     HAND_CAP = BASE_HAND_CAP + (ITEM_FLAGS.handCapBonus or 0)
@@ -192,36 +263,56 @@ local function refreshSet()
             table.insert(tiles, playerHand[i])
         end
     end
-    local s = detectSet(tiles)
-    -- Mixed sets are invisible until the player owns the unlocking item
-    if s and not Items.canPlaySet(s, ITEM_FLAGS) then s = nil end
     -- Single Winter tile in hand: playable as a freeze action
-    if not s and #tiles == 1 and tiles[1].suit == SUIT.FLOWER and tiles[1].label == "Winter" then
-        s = { type = "winter", tiles = tiles }
+    if #tiles == 1 and tiles[1].suit == SUIT.FLOWER and tiles[1].label == "Winter" then
+        local s = { type = "winter", tiles = tiles }
         currentSet    = s
         currentEffect = { attack=0, block=0, mana=0, skipTurn=true, freeDraws=0,
                           damageMultiplier=1, blockMultiplier=1, manaMultiplier=1 }
         return
     end
+    local s = detectSet(tiles)
+    if not s and #tiles == 1 and ITEM_FLAGS.singlePlay then
+        s = { type = "single", pure = true, tiles = tiles }
+    end
+    -- Mixed sets are invisible until the player owns the unlocking item
+    if s and not Items.canPlaySet(s, ITEM_FLAGS) then s = nil end
     currentSet    = s
     currentEffect = s and calculateEffect(s) or nil
 end
 
 local function awardEncounterWin(message)
+    local firstWin = not encounterWon
     encounterWon = true
+    if enemy then enemy.hp = 0 end
     if pendingGold == 0 then
         local base  = currentNodeType == "elite" and 25 or
                       currentNodeType == "boss"  and 50 or 15
         pendingGold = math.random(base, base + 15)
         playerGold  = playerGold + pendingGold
     end
+    if firstWin and (ITEM_FLAGS.manaGrowthOnWin or 0) > 0 then
+        manaGrowthBonus = manaGrowthBonus + ITEM_FLAGS.manaGrowthOnWin
+    end
     if message then combatLog = message end
 end
 
 local function checkPlayerMahjong()
     if encounterWon then return true end
-    local needMelds = 4 - playedMeldsCount
-    if needMelds >= 0 and canCompleteWithPlayed(playerHand, needMelds) then
+    local needMelds = math.max(0, 4 - playedMeldsCount)
+    local won
+    if needMelds == 0 then
+        -- All melds played — any pair in the remaining hand wins
+        won = canCompleteWithPlayedAllowingLeftovers(playerHand, 0)
+    else
+        won = canCompleteWithPlayed(playerHand, needMelds)
+    end
+    if won then
+        winningHand = {}
+        for _, meld in ipairs(playerRevealedMelds) do
+            for _, t in ipairs(meld.tiles) do table.insert(winningHand, t) end
+        end
+        for _, t in ipairs(playerHand) do table.insert(winningHand, t) end
         awardEncounterWin("MAHJONG! Combat won!")
         return true
     end
@@ -240,6 +331,8 @@ local function checkEnemyMahjong()
     if enemy and canCompleteWithPlayedAllowingLeftovers(enemy.hand, enemyMeldsNeeded()) then
         gameOver  = true
         combatLog = "Enemy completed a mahjong hand - the run is over!"
+        enemyWinningHand = {}
+        for _, t in ipairs(enemy.hand) do table.insert(enemyWinningHand, t) end
         return true
     end
     return false
@@ -256,8 +349,79 @@ local function enemyDiscardIfReady()
     return discarded
 end
 
+local function beginScry()
+    scryPending  = false
+    scryMode     = false
+    scryTiles    = {}
+    scrySelected = {}
+    if #drawPile == 0 then return end
+
+    local count = math.min(3, #drawPile)
+    for i = 1, count do
+        scryTiles[i] = drawPile[i]
+    end
+    scryMode        = true
+    selectedIndices = {}
+    hoveredTile     = nil
+    currentSet      = nil
+    currentEffect   = nil
+    combatLog       = "Glasswork Alloy: choose top tiles to discard."
+end
+
+local function maybeStartScryAfterDraw()
+    if not ITEM_FLAGS.scryOnFirstDraw or scryUsedThisTurn or #drawPile == 0 then return end
+    if encounterWon or gameOver then return end
+    scryUsedThisTurn = true
+    if flowerReplaceMode or springStealMode then
+        scryPending = true
+    else
+        beginScry()
+    end
+end
+
+local function maybeOpenPendingScry()
+    if scryPending and not flowerReplaceMode and not springStealMode and not encounterWon and not gameOver then
+        beginScry()
+    end
+end
+
+local function getScryTileAt(mx, my)
+    if not scryMode then return nil end
+    local tw, th, gap = 52, 72, 12
+    local totalW = #scryTiles * tw + math.max(0, #scryTiles - 1) * gap
+    local x0 = 640 - totalW / 2
+    local y0 = 394
+    for i = 1, #scryTiles do
+        local tx = x0 + (i - 1) * (tw + gap)
+        if mx >= tx and mx <= tx + tw and my >= y0 and my <= y0 + th then
+            return i
+        end
+    end
+    return nil
+end
+
+local function confirmScry()
+    if not scryMode then return end
+    local discarded = 0
+    for i = #scryTiles, 1, -1 do
+        if scrySelected[i] and drawPile[i] == scryTiles[i] then
+            table.insert(discardPile, table.remove(drawPile, i))
+            discarded = discarded + 1
+        end
+    end
+    scryMode     = false
+    scryPending  = false
+    scryTiles    = {}
+    scrySelected = {}
+    combatLog = discarded > 0
+        and ("Glasswork Alloy discarded " .. discarded .. " tile(s).")
+        or "Glasswork Alloy kept the top tiles."
+    refreshSet()
+end
+
 local processTileFromDraw
 local playCurrentSet
+local sortHand
 
 local function resolvePlayerHandAfterGain(logMsg, startingLog)
     if checkPlayerMahjong() then return true end
@@ -277,12 +441,14 @@ end
 
 local function drawPendingReplacementTiles(logMsg)
     local startingLog = combatLog
+    local drewTile = false
     while replacementDrawsPending > 0
     and #drawPile > 0
     and not encounterWon
     and not flowerReplaceMode
     and not springStealMode do
         replacementDrawsPending = replacementDrawsPending - 1
+        drewTile = true
         processTileFromDraw(drawTile(drawPile))
     end
 
@@ -297,6 +463,10 @@ local function drawPendingReplacementTiles(logMsg)
 
     if not encounterWon and not flowerReplaceMode and not springStealMode then
         resolvePlayerHandAfterGain(logMsg, startingLog)
+    end
+    maybeOpenPendingScry()
+    if drewTile then
+        maybeStartScryAfterDraw()
     end
 end
 
@@ -323,6 +493,7 @@ local function startEncounterFromDef(def, nodeType)
     playerRevealedMelds  = {}
     tileTooltip          = nil
     itemTooltip          = nil
+    enemyTooltip         = false
     showPlayedHands      = false
     showItemsPanel       = false
 
@@ -337,7 +508,9 @@ local function startEncounterFromDef(def, nodeType)
 
     enemy           = def.create and def.create() or createEnemy(def.name, def.hp, def.minAtk, def.maxAtk)
     enemy.hand      = dealHand(drawPile, 13)
-    encounterWon    = false
+    encounterWon       = false
+    winningHand        = {}
+    enemyWinningHand   = {}
     combatLog       = ""
     selectedIndices = {}
     hoveredTile     = nil
@@ -356,6 +529,11 @@ local function startEncounterFromDef(def, nodeType)
     springStealMode      = false
     springSelected       = {}
     replacementDrawsPending = 0
+    scryMode             = false
+    scryTiles            = {}
+    scrySelected         = {}
+    scryUsedThisTurn     = false
+    scryPending          = false
     autumnShieldActive   = false
     mult.damage = 1
     mult.block  = 1
@@ -364,8 +542,14 @@ local function startEncounterFromDef(def, nodeType)
     playerBlock          = 0
 
     -- Red Endless Knot: 1 free draw per 10 gold at combat start
-    if ITEM_FLAGS.goldDrawBonus then
-        itemCombatFreeDraws = math.floor(playerGold / 10)
+    if ITEM_FLAGS.goldDrawBonus and not ITEM_FLAGS.noFreeDraws then
+        itemCombatFreeDraws = addFortuneFreeDrawBonus(math.floor(playerGold / 10))
+    end
+
+    -- Snake Eyes: roll 2 dice at combat start for free draws
+    if ITEM_FLAGS.diceRollFreeDraw and not ITEM_FLAGS.noFreeDraws then
+        local roll = math.random(1, 6) + math.random(1, 6)
+        itemCombatFreeDraws = itemCombatFreeDraws + addFortuneFreeDrawBonus(roll)
     end
 
     -- Auto-sort hand at combat start
@@ -384,11 +568,13 @@ end
 -- NOTE: assigned to the forward-declared upvalue so drawPendingReplacementTiles can call it.
 processTileFromDraw = function(tile)
     if not tile then return end
+    notePlayerDrewTile()
     if tile.suit == SUIT.FLOWER then
         local lbl = tile.label
         if lbl == "Winter" then
             -- Winter stays in hand and triggers when played, not on draw
             table.insert(playerHand, tile)
+            sortHand()
             combatLog = "Winter drawn — select it and play to freeze the enemy."
         else
             table.insert(discardPile, tile)
@@ -423,6 +609,7 @@ processTileFromDraw = function(tile)
         end
     else
         table.insert(playerHand, tile)
+        sortHand()
     end
 end
 
@@ -459,35 +646,57 @@ local function tryDraw()
     end
     processTileFromDraw(tile)
     if #playerHand > prevSize then
+        local idx = findTileIndex(tile) or #playerHand
         local sx, sy, tw, th, tg = getHandLayout(#playerHand)
-        local destX = sx + (#playerHand - 1) * (tw + tg)
-        queueDrawAnim(playerHand[#playerHand], #playerHand, destX, sy, 580, 355, tw, th)
+        local destX = sx + (idx - 1) * (tw + tg)
+        queueDrawAnim(tile, idx, destX, sy, 580, 355, tw, th)
     end
     drawPendingReplacementTiles()
+    maybeStartScryAfterDraw()
 end
 
 local function startPlayerTurn()
-    drawsThisTurn        = 0
-    itemFreeDraws        = ITEM_FLAGS.extraFreeDraw or 0
-    selectedIndices      = {}
-    hoveredTile          = nil
-    turnPhase            = "player"
-    freeReplace.available = true
+    drawsThisTurn         = 0
+    itemFreeDraws         = ITEM_FLAGS.noFreeDraws and 0 or addFortuneFreeDrawBonus(ITEM_FLAGS.extraFreeDraw or 0)
+    selectedIndices       = {}
+    hoveredTile           = nil
+    turnPhase             = "player"
     freeReplace.mode      = false
+    scryMode              = false
+    scryTiles             = {}
+    scrySelected          = {}
+    scryUsedThisTurn      = false
+    scryPending           = false
 
-    local manaRegen = ITEM_FLAGS.turnManaBonus or 0
+    local manaRegen = (ITEM_FLAGS.turnManaBonus or 0) + manaGrowthBonus
     if manaRegen > 0 then
         playerMana = math.min(playerMaxMana, playerMana + manaRegen)
         if ITEM_FLAGS.sharedPool then playerHP = playerMana end
     end
 
+    if (ITEM_FLAGS.turnStartHPLoss or 0) > 0 then
+        playerHP = math.max(1, playerHP - ITEM_FLAGS.turnStartHPLoss)
+        if ITEM_FLAGS.sharedPool then playerMana = playerHP end
+    end
+    if (ITEM_FLAGS.turnStartBlock or 0) > 0 then
+        playerBlock = playerBlock + ITEM_FLAGS.turnStartBlock
+    end
+
+    if ITEM_FLAGS.manaFromEnemyDamage and enemyDmgThisTurn > 0 then
+        playerMana = math.min(playerMaxMana, playerMana + enemyDmgThisTurn)
+        if ITEM_FLAGS.sharedPool then playerHP = playerMana end
+    end
+    enemyDmgThisTurn = 0
+
     if #playerHand > HAND_CAP then
-        mustDiscard = true
+        mustDiscard           = true
+        freeReplace.available = false
         refreshSet()
         return
     end
 
-    mustDiscard = false
+    mustDiscard           = false
+    freeReplace.available = true
     -- Refresh: most recent enemy discard is always claimable until the player draws
     if enemy and not enemyIsDead(enemy) and #enemy.discards > 0 then
         claimableDiscard = enemy.discards[#enemy.discards]
@@ -578,10 +787,13 @@ local function findClaimSet(claimedIdx)
             end
         end
     end
+    if ITEM_FLAGS.singlePlay then
+        return { claimedIdx }
+    end
 end
 
 local function claimDiscard()
-    if not claimableDiscard or turnPhase ~= "player" or mustDiscard or drawsThisTurn > 0 then return false end
+    if not claimableDiscard or turnPhase ~= "player" or mustDiscard or (drawsThisTurn > 0 and not burstDiscardMode) then return false end
     if not canClaimTile(claimableDiscard, playerHand, ITEM_FLAGS) then return false end
     if enemy and #enemy.discards > 0 then
         table.remove(enemy.discards)
@@ -602,7 +814,7 @@ local function claimDiscard()
     return true
 end
 
-local function sortHand()
+sortHand = function()
     table.sort(playerHand, function(a, b)
         local sa = SUIT_ORDER[a.suit] or 99
         local sb = SUIT_ORDER[b.suit] or 99
@@ -659,8 +871,8 @@ local function applyEffect(effect)
     if effect.skipTurn then
         skipNextEnemyTurn = true
     end
-    if effect.freeDraws and effect.freeDraws > 0 then
-        freeDrawsRemaining = freeDrawsRemaining + effect.freeDraws
+    if effect.freeDraws and effect.freeDraws > 0 and not ITEM_FLAGS.noFreeDraws then
+        freeDrawsRemaining = freeDrawsRemaining + addFortuneFreeDrawBonus(effect.freeDraws)
     end
 end
 
@@ -681,8 +893,11 @@ playCurrentSet = function()
     removeSelectedTiles(playedTiles)
     triggerPlayFlash()
     if not encounterWon then
-        if setType ~= "pair" and setType ~= "winter" then
+        if setType ~= "pair" and setType ~= "winter" and setType ~= "single" then
             playedMeldsCount = playedMeldsCount + 1
+        end
+        if enemy and enemy.attackBonus ~= nil then
+            enemy.attackBonus = 0
         end
         checkPlayerMahjong()
     end
@@ -744,6 +959,63 @@ function love.update(dt)
     updateAnim(dt)
 end
 
+local function drawScryOverlay()
+    if not scryMode or gameOver or runComplete then return end
+
+    love.graphics.setColor(0, 0, 0, 0.58)
+    love.graphics.rectangle("fill", 0, 0, 1280, 720)
+    drawUIPanel(426, 328, 428, 206, 6)
+    love.graphics.setFont(FONT_TITLE)
+    love.graphics.setColor(0.86, 0.76, 0.52)
+    love.graphics.printf("Glasswork Alloy", 426, 348, 428, "center")
+    love.graphics.setFont(FONT_SMALL)
+    love.graphics.setColor(0.66, 0.62, 0.48)
+    love.graphics.printf("Select top wall tiles to discard", 426, 371, 428, "center")
+
+    local tw, th, gap = 52, 72, 12
+    local totalW = #scryTiles * tw + math.max(0, #scryTiles - 1) * gap
+    local x0 = 640 - totalW / 2
+    local y0 = 394
+    for i, tile in ipairs(scryTiles) do
+        local tx = x0 + (i - 1) * (tw + gap)
+        drawMahjongTile(tile, tx, y0, tw, th, scrySelected[i], false, false, false, 0)
+        if scrySelected[i] then
+            love.graphics.setFont(FONT_SMALL)
+            love.graphics.setColor(0.92, 0.42, 0.34)
+            love.graphics.printf("Discard", tx - 5, y0 + th + 5, tw + 10, "center")
+        end
+    end
+
+    love.graphics.setColor(0.04, 0.03, 0.02, 0.88)
+    love.graphics.rectangle("fill", SCRY_CONFIRM_BTN.x, SCRY_CONFIRM_BTN.y,
+        SCRY_CONFIRM_BTN.w, SCRY_CONFIRM_BTN.h, 4, 4)
+    love.graphics.setColor(0.44, 0.68, 0.48, 0.85)
+    love.graphics.rectangle("line", SCRY_CONFIRM_BTN.x, SCRY_CONFIRM_BTN.y,
+        SCRY_CONFIRM_BTN.w, SCRY_CONFIRM_BTN.h, 4, 4)
+    love.graphics.setFont(FONT_SMALL)
+    love.graphics.setColor(0.82, 0.86, 0.70)
+    love.graphics.printf("Confirm", SCRY_CONFIRM_BTN.x, SCRY_CONFIRM_BTN.y + 7,
+        SCRY_CONFIRM_BTN.w, "center")
+end
+
+local function drawTooltipOverlay()
+    if gameOver or runComplete then return end
+
+    if tileTooltip then
+        drawInfoPopup(440, 455, getTileInfo(tileTooltip))
+    elseif itemTooltip then
+        local it = Items.ITEMS[itemTooltip]
+        if it then
+            local rc = it.rarity == "rare"     and {0.90, 0.62, 0.10} or
+                       it.rarity == "uncommon" and {0.46, 0.72, 0.90} or
+                                                   {0.64, 0.62, 0.52}
+            drawInfoPopup(330, 354, { it.name, it.desc }, rc[1])
+        end
+    elseif enemyTooltip and enemy then
+        drawInfoPopup(846, 214, getEnemyInfo(enemy), 0.86)
+    end
+end
+
 function love.draw()
     drawRoom()
     drawLighting()
@@ -776,6 +1048,15 @@ function love.draw()
         return
     end
 
+    if gameState == "jiangshi" then
+        shopItemRects, shopExitBtn = Shop.draw(shopOffer, Items.ITEMS, playerItems, "jiangshi")
+        return
+    end
+    if gameState == "tianshi" then
+        shopItemRects, shopExitBtn = Shop.draw(shopOffer, Items.ITEMS, playerItems, "tianshi")
+        return
+    end
+
     if gameState == "item_reward" then
         itemRewardRects, itemRewardSkipBtn = Shop.draw(itemRewardOffer, Items.ITEMS, playerItems, "reward")
         return
@@ -796,6 +1077,17 @@ function love.draw()
 
     -- Enemy claimed melds / last discard (right of wall)
     drawCenterInfo(enemy)
+
+    -- "Near Mahjong" warning when enemy is 1 meld away (revealed or hidden)
+    if enemy and not enemyIsDead(enemy) then
+        local needed = enemyMeldsNeeded()
+        if needed == 1 and canCompleteWithPlayedAllowingLeftovers(enemy.hand, 0) then
+            local pulse = 0.80 + 0.20 * math.sin(love.timer.getTime() * 6)
+            love.graphics.setFont(FONT_UI)
+            love.graphics.setColor(0.95, 0.22, 0.18, pulse)
+            love.graphics.printf("⚠  NEAR MAHJONG", 840, 420, 360, "center")
+        end
+    end
 
     -- Combat log (slim, in gap between enemy bar and wall)
     if combatLog ~= "" then
@@ -991,7 +1283,8 @@ function love.draw()
     local baseDrawCost = math.ceil(drawsThisTurn / 2) * 5
     local drawCost     = (useWindDraw or useItemDraw) and 0
                          or (ITEM_FLAGS.sharedPool and baseDrawCost * 2 or baseDrawCost)
-    local canDraw      = playerMana >= drawCost and turnPhase == "player" and not mustDiscard and not burstDiscardMode and not freeReplace.mode
+    local canDraw      = playerMana >= drawCost and turnPhase == "player"
+                         and not mustDiscard and not burstDiscardMode and not freeReplace.mode and not scryMode
     local drawLabel
     if useWindDraw then
         drawLabel = "Draw (Wind x" .. freeDrawsRemaining .. ")"
@@ -1005,19 +1298,25 @@ function love.draw()
     drawBtn(MANA_DRAW_BTN, drawLabel, canDraw, 0.20, 0.36, 0.72)
 
     local canPlay = currentSet ~= nil and currentEffect ~= nil
-                    and turnPhase == "player" and not mustDiscard and not burstDiscardMode and not freeReplace.mode
+                    and turnPhase == "player" and not mustDiscard
+                    and not burstDiscardMode and not freeReplace.mode and not scryMode
     drawBtn(PLAY_SET_BTN, "Play Set", canPlay, 0.88, 0.74, 0.14)
 
-    if claimableDiscard and not encounterWon and drawsThisTurn == 0
-    and turnPhase == "player" and canClaimTile(claimableDiscard, playerHand, ITEM_FLAGS) then
+    if claimableDiscard and not encounterWon and (drawsThisTurn == 0 or burstDiscardMode)
+    and turnPhase == "player" and not scryMode and canClaimTile(claimableDiscard, playerHand, ITEM_FLAGS) then
         drawBtn(CLAIM_BTN, "Claim  [C]", true, 0.68, 0.50, 0.12)
     end
 
     local canReplaceBtn = freeReplace.available and turnPhase == "player"
-                          and not mustDiscard and not burstDiscardMode and #drawPile > 0
+                          and not mustDiscard and not burstDiscardMode and not scryMode and #drawPile > 0
     if canReplaceBtn or freeReplace.mode then
         local replaceLabel = freeReplace.mode and "Cancel Replace" or "Replace (1×)"
         drawBtn(REPLACE_BTN, replaceLabel, true, 0.28, 0.62, 0.40)
+    end
+
+    -- DEV: skip combat button (top-left)
+    if not encounterWon then
+        drawBtn(DEV_SKIP_BTN, "DEV Skip", true, 0.22, 0.44, 0.22)
     end
 
     -- Draw pile count (subtle, above buttons)
@@ -1138,19 +1437,8 @@ function love.draw()
 
     love.graphics.pop()   -- end screen shake; overlays below are stable
 
-    -- ── Tile / item info tooltip (right-click) ────────────────────────────────
-    if tileTooltip and not gameOver and not runComplete then
-        local lines = getTileInfo(tileTooltip)
-        drawInfoPopup(440, 455, lines)
-    elseif itemTooltip and not gameOver and not runComplete then
-        local it = Items.ITEMS[itemTooltip]
-        if it then
-            local rc = it.rarity == "rare"     and {0.90, 0.62, 0.10} or
-                       it.rarity == "uncommon" and {0.46, 0.72, 0.90} or
-                                                   {0.64, 0.62, 0.52}
-            drawInfoPopup(330, 354, { it.name, it.desc }, rc[1])
-        end
-    end
+    drawScryOverlay()
+    drawTooltipOverlay()
 
     -- ── Items panel overlay (I key) ───────────────────────────────────────────
     if showItemsPanel and not gameOver and not runComplete then
@@ -1218,11 +1506,25 @@ function love.draw()
         love.graphics.rectangle("fill", 0, 0, 1280, 720)
         love.graphics.setFont(FONT_TITLE)
         love.graphics.setColor(0.34, 0.88, 0.42)
-        love.graphics.printf("Enemy Defeated!", 0, 286, 1280, "center")
+        love.graphics.printf("Enemy Defeated!", 0, 200, 1280, "center")
         love.graphics.setColor(0.88, 0.72, 0.16)
         love.graphics.printf(
             "+" .. pendingGold .. " Gold  (total: " .. playerGold .. ")",
-            0, 322, 1280, "center")
+            0, 236, 1280, "center")
+        -- Winning hand
+        if #winningHand > 0 then
+            local TW, TH = 44, 60
+            local gap    = 4
+            local total  = #winningHand * (TW + gap) - gap
+            local tx     = math.floor((1280 - total) / 2)
+            local ty     = 276
+            love.graphics.setFont(FONT_SMALL)
+            love.graphics.setColor(0.64, 0.62, 0.50)
+            love.graphics.printf("Winning Hand", 0, ty - 18, 1280, "center")
+            for i, tile in ipairs(winningHand) do
+                drawMahjongTile(tile, tx + (i-1)*(TW+gap), ty, TW, TH, false, false, false, false, 0)
+            end
+        end
         love.graphics.setFont(FONT_UI)
         love.graphics.setColor(0.54, 0.54, 0.54)
         love.graphics.printf("Press SPACE to continue", 0, 358, 1280, "center")
@@ -1246,12 +1548,27 @@ function love.draw()
         love.graphics.rectangle("fill", 0, 0, 1280, 720)
         love.graphics.setFont(FONT_TITLE)
         love.graphics.setColor(0.86, 0.16, 0.16)
-        love.graphics.printf("GAME OVER", 0, 296, 1280, "center")
+        love.graphics.printf("GAME OVER", 0, 200, 1280, "center")
         love.graphics.setFont(FONT_UI)
         if combatLog ~= "" then
             love.graphics.setColor(0.64, 0.64, 0.64)
-            love.graphics.printf(combatLog, 0, 340, 1280, "center")
+            love.graphics.printf(combatLog, 0, 244, 1280, "center")
         end
+        -- Enemy winning hand
+        if #enemyWinningHand > 0 then
+            local TW, TH = 44, 60
+            local gap    = 4
+            local total  = #enemyWinningHand * (TW + gap) - gap
+            local tx     = math.floor((1280 - total) / 2)
+            local ty     = 284
+            love.graphics.setFont(FONT_SMALL)
+            love.graphics.setColor(0.76, 0.34, 0.34)
+            love.graphics.printf("Enemy's Winning Hand", 0, ty - 18, 1280, "center")
+            for i, tile in ipairs(enemyWinningHand) do
+                drawMahjongTile(tile, tx + (i-1)*(TW+gap), ty, TW, TH, false, false, false, false, 0)
+            end
+        end
+        love.graphics.setFont(FONT_UI)
         love.graphics.setColor(0.44, 0.44, 0.44)
         love.graphics.printf("Press R to restart", 0, 372, 1280, "center")
     end
@@ -1261,36 +1578,37 @@ function love.mousemoved(x, y)
     hoveredTile = getHoveredTileIndex(playerHand, x, y, selectedIndices)
 end
 
-function love.mousepressed(x, y, button)
-    -- Right-click: toggle tile or item info tooltip
-    if button == 2 and gameState == "combat" and not gameOver and not runComplete then
-        local tileIdx = getHoveredTileIndex(playerHand, x, y, selectedIndices)
-        if tileIdx then
-            local t = playerHand[tileIdx]
-            if tileTooltip == t then tileTooltip = nil else tileTooltip = t end
-            itemTooltip = nil
-            return
-        end
-        for _, r in ipairs(itemPanelRects) do
-            if hitTest(x, y, r) then
-                if itemTooltip == r.id then itemTooltip = nil else itemTooltip = r.id end
-                tileTooltip = nil
-                return
-            end
-        end
-        tileTooltip = nil
-        itemTooltip = nil
+local function handleRightClick(x, y)
+    local tileIdx = getHoveredTileIndex(playerHand, x, y, selectedIndices)
+    if tileIdx then
+        local t = playerHand[tileIdx]
+        if tileTooltip == t then tileTooltip = nil else tileTooltip = t end
+        itemTooltip  = nil
+        enemyTooltip = false
         return
     end
-
-    if button ~= 1 or gameOver or runComplete then return end
-
-    -- Run-start item selection
-    if gameState == "run_start" then
-        if hitTest(x, y, runStartSkipBtn) then
-            gameState = "map"
+    for _, r in ipairs(itemPanelRects) do
+        if hitTest(x, y, r) then
+            if itemTooltip == r.id then itemTooltip = nil else itemTooltip = r.id end
+            tileTooltip  = nil
+            enemyTooltip = false
             return
         end
+    end
+    if enemy and x >= 86 and x <= 1194 and y >= 76 and y <= 196 then
+        enemyTooltip = not enemyTooltip
+        tileTooltip  = nil
+        itemTooltip  = nil
+        return
+    end
+    tileTooltip  = nil
+    itemTooltip  = nil
+    enemyTooltip = false
+end
+
+local function handleShopScreenClick(x, y)
+    if gameState == "run_start" then
+        if hitTest(x, y, runStartSkipBtn) then gameState = "map"; return end
         for _, rect in ipairs(runStartRects) do
             if hitTest(x, y, rect) then
                 table.insert(playerItems, rect.id)
@@ -1301,13 +1619,8 @@ function love.mousepressed(x, y, button)
         end
         return
     end
-
-    -- Shop
     if gameState == "shop" then
-        if hitTest(x, y, shopExitBtn) then
-            gameState = "map"
-            return
-        end
+        if hitTest(x, y, shopExitBtn) then gameState = "map"; return end
         for _, rect in ipairs(shopItemRects) do
             if hitTest(x, y, rect) then
                 table.insert(playerItems, rect.id)
@@ -1318,120 +1631,150 @@ function love.mousepressed(x, y, button)
         end
         return
     end
-
-    -- Elite item reward
-    if gameState == "item_reward" then
-        if hitTest(x, y, itemRewardSkipBtn) then
+    -- item_reward
+    if hitTest(x, y, itemRewardSkipBtn) then gameState = "map"; return end
+    for _, rect in ipairs(itemRewardRects) do
+        if hitTest(x, y, rect) then
+            table.insert(playerItems, rect.id)
+            applyItemFlags()
             gameState = "map"
             return
         end
-        for _, rect in ipairs(itemRewardRects) do
-            if hitTest(x, y, rect) then
-                table.insert(playerItems, rect.id)
-                applyItemFlags()
-                gameState = "map"
-                return
-            end
+    end
+end
+
+local function handleJiangshiClick(x, y)
+    if hitTest(x, y, shopExitBtn) then
+        revealTianshiCompanion(jiangshiNodeFloor, jiangshiNodeCol)
+        gameState = "map"
+        return
+    end
+    for _, rect in ipairs(shopItemRects) do
+        if hitTest(x, y, rect) then
+            table.insert(playerItems, rect.id)
+            applyItemFlags()
+            gameState = "map"
+            return
         end
+    end
+end
+
+local function handleTianshiClick(x, y)
+    if hitTest(x, y, shopExitBtn) then gameState = "map"; return end
+    for _, rect in ipairs(shopItemRects) do
+        if hitTest(x, y, rect) then
+            table.insert(playerItems, rect.id)
+            applyItemFlags()
+            gameState = "map"
+            return
+        end
+    end
+end
+
+local function handleMapClick(x, y)
+    -- Tianshi companion nodes take priority over map nodes
+    local tianshi = getClickedTianshiNode(x, y)
+    if tianshi then
+        visitTianshiNode(tianshi.floor, tianshi.col)
+        local heal = math.floor(playerMaxHP * 0.40)
+        playerHP  = math.min(playerMaxHP, playerHP + heal)
+        if ITEM_FLAGS.sharedPool then playerMana = playerHP end
+        shopOffer = Shop.generateOffer(playerItems, Items.bySource("tianshi"))
+        gameState = "tianshi"
         return
     end
 
-    -- Map navigation
-    if gameState == "map" then
-        local clicked = getClickedMapNode(x, y)
-        if clicked then
-            local node = visitMapNode(clicked.floor, clicked.col)
-            if not node then return end
-            if node.type == "rest" then
-                local heal = math.floor(playerMaxHP * 0.25)
-                playerHP   = math.min(playerMaxHP, playerHP + heal)
-                if ITEM_FLAGS.sharedPool then playerMana = playerHP end
-                combatLog  = "Rested — recovered " .. heal .. " HP"
-            elseif node.type == "shop" then
-                shopOffer = Shop.generateOffer(playerItems, Items.bySource("shop"))
-                gameState = "shop"
-            else
-                local def = getNodeEnemyDef(node, combatsThisAct)
-                if node.type == "combat" then combatsThisAct = combatsThisAct + 1 end
-                if def then
-                    startEncounterFromDef(def, node.type)
-                    startPlayerTurn()
-                    gameState = "combat"
-                end
-            end
+    local clicked = getClickedMapNode(x, y)
+    if not clicked then return end
+    local node = visitMapNode(clicked.floor, clicked.col)
+    if not node then return end
+    if node.type == "rest" then
+        local heal = math.floor(playerMaxHP * 0.25)
+        playerHP  = math.min(playerMaxHP, playerHP + heal)
+        if ITEM_FLAGS.sharedPool then playerMana = playerHP end
+        combatLog = "Rested — recovered " .. heal .. " HP"
+    elseif node.type == "shop" then
+        shopOffer = Shop.generateOffer(playerItems, Items.bySource("shop"))
+        gameState = "shop"
+    elseif node.type == "jiangshi" then
+        jiangshiNodeFloor = clicked.floor
+        jiangshiNodeCol   = clicked.col
+        shopOffer = Shop.generateOffer(playerItems, Items.bySource("jiangshi"))
+        gameState = "jiangshi"
+    else
+        local def = getNodeEnemyDef(node)
+        if node.type == "combat" then combatsThisAct = combatsThisAct + 1 end
+        if def then
+            startEncounterFromDef(def, node.type)
+            startPlayerTurn()
+            gameState = "combat"
         end
-        return
     end
+end
 
+local function handleCombatClick(x, y)
     if encounterWon then return end
+    if hitTest(x, y, DEV_SKIP_BTN) then awardEncounterWin("[DEV] Combat skipped"); return end
 
-    -- Spring steal: click enemy tiles to select, buttons blocked
+    if scryMode then
+        if hitTest(x, y, SCRY_CONFIRM_BTN) then confirmScry(); return end
+        local idx = getScryTileAt(x, y)
+        if idx then scrySelected[idx] = not scrySelected[idx] end
+        return
+    end
+
     if springStealMode then
         local idx = getEnemyHandTileAt(enemy, x, y)
         if idx then
             local selCount = 0
             for _ in pairs(springSelected) do selCount = selCount + 1 end
-            if springSelected[idx] then
-                springSelected[idx] = nil
-            elseif selCount < 4 then
-                springSelected[idx] = true
-            end
+            if springSelected[idx] then springSelected[idx] = nil
+            elseif selCount < 4 then springSelected[idx] = true end
         end
         return
     end
 
-    -- Flower replace: only allow tile toggling, no buttons
     if flowerReplaceMode then
         if hoveredTile then
-            if selectedIndices[hoveredTile] then
-                selectedIndices[hoveredTile] = nil
-            else
-                selectedIndices[hoveredTile] = true
-            end
+            if selectedIndices[hoveredTile] then selectedIndices[hoveredTile] = nil
+            else selectedIndices[hoveredTile] = true end
         end
         return
     end
 
-    -- Sort button click
-    if hitTest(x, y, SORT_BTN) then
-        sortHand()
-        return
-    end
+    if hitTest(x, y, SORT_BTN)  then sortHand();    return end
+    if hitTest(x, y, CLAIM_BTN) then claimDiscard(); return end
 
-    -- Claim enemy discard button
-    if hitTest(x, y, CLAIM_BTN) then
-        claimDiscard()
-        return
-    end
-
-    -- Mana draw button
     if hitTest(x, y, MANA_DRAW_BTN) then
-        if turnPhase == "player" and not mustDiscard then
+        if turnPhase == "player" and not mustDiscard and not burstDiscardMode
+        and not freeReplace.mode and not scryMode then
             claimableDiscard = nil
             tryDraw()
         end
         return
     end
 
-    -- Play Set button
     if hitTest(x, y, PLAY_SET_BTN) then
-        playCurrentSet()
+        if turnPhase == "player" and not burstDiscardMode
+        and not freeReplace.mode and not scryMode then
+            playCurrentSet()
+        end
         return
     end
 
-    -- Replace button
     if hitTest(x, y, REPLACE_BTN) then
         if freeReplace.mode then
             freeReplace.mode = false
-            combatLog       = ""
-            selectedIndices = {}
+            combatLog        = ""
+            selectedIndices  = {}
             refreshSet()
-        elseif freeReplace.available and turnPhase == "player" and not mustDiscard and not burstDiscardMode and #drawPile > 0 then
+        elseif freeReplace.available and turnPhase == "player"
+        and not mustDiscard and not burstDiscardMode and not scryMode and #drawPile > 0 then
             freeReplace.mode = true
-            selectedIndices = {}
-            currentSet      = nil
-            currentEffect   = nil
-            combatLog       = "Select a tile to replace."
+            selectedIndices  = {}
+            currentSet       = nil
+            currentEffect    = nil
+            combatLog        = "Select a tile to replace."
         end
         return
     end
@@ -1440,16 +1783,19 @@ function love.mousepressed(x, y, button)
         if hoveredTile then
             local discarded = table.remove(playerHand, hoveredTile)
             table.insert(discardPile, discarded)
+            if ITEM_FLAGS.discardAlsoPlays and not encounterWon then
+                local setInfo = { type = "single", tiles = { discarded }, pure = true }
+                applyEffect(calculateEffect(setInfo))
+                combatLog = "Furnace burns " .. (discarded.label or "?") .. "!"
+            end
             if enemy and not encounterWon then
                 if enemyTryClaim(enemy, discardPile) then
                     claimableDiscard = nil
                     local enemyDiscarded = enemyDiscardIfReady()
                     if not gameOver then
-                        if enemyDiscarded then
-                            combatLog = "Enemy claimed your discard and discarded."
-                        else
-                            combatLog = "Enemy claimed your discard!"
-                        end
+                        combatLog = enemyDiscarded
+                            and "Enemy claimed your discard and discarded."
+                            or  "Enemy claimed your discard!"
                     end
                 end
             end
@@ -1461,23 +1807,37 @@ function love.mousepressed(x, y, button)
         return
     end
 
-    -- Replace mode: clicking a tile swaps it out for a new draw
     if freeReplace.mode then
         if hoveredTile then
-            local discarded = table.remove(playerHand, hoveredTile)
-            table.insert(discardPile, discarded)
-            freeReplace.mode      = false
-            freeReplace.available = false
-            selectedIndices      = {}
-            hoveredTile          = nil
-            local tile = drawTile(drawPile)
-            processTileFromDraw(tile)
-            if not mustDiscard then combatLog = "Tile replaced." end
+            if ITEM_FLAGS.replaceStealFromEnemy and enemy and not enemyIsDead(enemy) and #enemy.hand > 0 then
+                local original = table.remove(playerHand, hoveredTile)
+                table.insert(discardPile, original)
+                local stealIdx = math.random(#enemy.hand)
+                local stolen   = table.remove(enemy.hand, stealIdx)
+                freeReplace.mode      = false
+                freeReplace.available = false
+                selectedIndices       = {}
+                hoveredTile           = nil
+                processTileFromDraw(stolen)
+                maybeStartScryAfterDraw()
+                if not mustDiscard and not scryMode then combatLog = "Dàoqiè: stole " .. (stolen.label or "?") .. " from the enemy!" end
+            elseif #drawPile == 0 then
+                combatLog = "Draw pile is empty — cannot replace."
+            else
+                local discarded = table.remove(playerHand, hoveredTile)
+                table.insert(discardPile, discarded)
+                freeReplace.mode      = false
+                freeReplace.available = false
+                selectedIndices       = {}
+                hoveredTile           = nil
+                processTileFromDraw(drawTile(drawPile))
+                maybeStartScryAfterDraw()
+                if not mustDiscard and not scryMode then combatLog = "Tile replaced." end
+            end
         end
         return
     end
 
-    -- Toggle tile selection (max 4) - only during player turn, not during discard sequence
     if turnPhase ~= "player" or burstDiscardMode then return end
     if hoveredTile then
         if selectedIndices[hoveredTile] then
@@ -1485,19 +1845,42 @@ function love.mousepressed(x, y, button)
         else
             local count = 0
             for _ in pairs(selectedIndices) do count = count + 1 end
-            if count < 4 then
-                selectedIndices[hoveredTile] = true
-            end
+            if count < 4 then selectedIndices[hoveredTile] = true end
         end
         refreshSet()
     end
+end
+
+function love.mousepressed(x, y, button)
+    if button == 2 and gameState == "combat" and not gameOver and not runComplete then
+        handleRightClick(x, y)
+        return
+    end
+    if button ~= 1 or gameOver or runComplete then return end
+    if gameState == "run_start" or gameState == "shop" or gameState == "item_reward" then
+        handleShopScreenClick(x, y)
+        return
+    end
+    if gameState == "jiangshi" then
+        handleJiangshiClick(x, y)
+        return
+    end
+    if gameState == "tianshi" then
+        handleTianshiClick(x, y)
+        return
+    end
+    if gameState == "map" then
+        handleMapClick(x, y)
+        return
+    end
+    handleCombatClick(x, y)
 end
 
 function love.keypressed(key)
     if key == "r" then
         love.event.quit("restart")
 
-    elseif gameState == "run_start" or gameState == "shop" or gameState == "item_reward" then
+    elseif gameState == "run_start" or gameState == "shop" or gameState == "item_reward" or gameState == "jiangshi" or gameState == "tianshi" then
         if key == "escape" then gameState = "map" end
 
     elseif gameOver or runComplete then
@@ -1525,6 +1908,15 @@ function love.keypressed(key)
             else
                 gameState = "map"
             end
+        end
+        return
+
+    elseif scryMode then
+        if key == "return" or key == "space" then
+            confirmScry()
+        elseif key == "escape" then
+            scrySelected = {}
+            confirmScry()
         end
         return
 
@@ -1572,6 +1964,7 @@ function love.keypressed(key)
         showItemsPanel  = false
         tileTooltip     = nil
         itemTooltip     = nil
+        enemyTooltip    = false
 
     elseif key == "tab" then
         showItemsPanel  = false
@@ -1602,6 +1995,7 @@ function love.keypressed(key)
             startPlayerTurn()
         else
             turnPhase = "enemy"
+            local eName = enemy and enemy.name or "Enemy"
             local result = enemyExecuteIntent(enemy, drawPile)
 
             local function applySingleHit(dmg)
@@ -1609,7 +2003,7 @@ function love.keypressed(key)
                     autumnShieldActive = false
                     combatLog = combatLog .. " Autumn shield absorbed the hit!"
                     triggerShake(0.28)
-                    return 0
+                    return 0, dmg
                 end
                 local absorbed = math.min(playerBlock, dmg)
                 playerBlock    = math.max(0, playerBlock - absorbed)
@@ -1625,12 +2019,12 @@ function love.keypressed(key)
                 local taken, absorbed = applySingleHit(result.damage)
                 if combatLog == "" then
                     if absorbed > 0 and taken == 0 then
-                        combatLog = "Enemy attacked for " .. result.damage .. " — fully blocked!"
+                        combatLog = eName .. " attacked for " .. result.damage .. " — fully blocked!"
                         triggerShake(0.35)
                     elseif absorbed > 0 then
-                        combatLog = "Enemy attacked for " .. result.damage .. " — " .. absorbed .. " blocked, " .. taken .. " taken."
+                        combatLog = eName .. " attacked for " .. result.damage .. " — " .. absorbed .. " blocked, " .. taken .. " taken."
                     else
-                        combatLog = "Enemy attacked for " .. taken .. " damage!"
+                        combatLog = eName .. " attacked for " .. taken .. " damage!"
                     end
                 end
 
@@ -1643,13 +2037,13 @@ function love.keypressed(key)
                     if playerHP <= 0 then break end
                 end
                 if totalAbsorbed > 0 and totalTaken == 0 then
-                    combatLog = "Enemy struck " .. result.hits .. "×" .. result.damage .. " — all blocked!"
+                    combatLog = eName .. " struck " .. result.hits .. "×" .. result.damage .. " — all blocked!"
                     triggerShake(0.35)
                 elseif totalAbsorbed > 0 then
-                    combatLog = "Enemy struck " .. result.hits .. "×" .. result.damage
+                    combatLog = eName .. " struck " .. result.hits .. "×" .. result.damage
                                 .. " — " .. totalAbsorbed .. " blocked, " .. totalTaken .. " total damage."
                 else
-                    combatLog = "Enemy struck " .. result.hits .. "×" .. result.damage
+                    combatLog = eName .. " struck " .. result.hits .. "×" .. result.damage
                                 .. " for " .. totalTaken .. " total damage!"
                     triggerShake(math.min(1.0, totalTaken / 20))
                 end
@@ -1660,16 +2054,25 @@ function love.keypressed(key)
                         table.insert(enemy.hand, table.remove(drawPile, 1))
                     end
                 end
-                combatLog = "Wind Spirit draws " .. result.count .. " tiles!"
+                combatLog = eName .. " draws " .. result.count .. " tiles!"
 
             elseif result.type == "block" then
-                combatLog = "Wind Spirit raises a spirit shield! (+" .. result.amount .. " shield)"
+                combatLog = eName .. " raises a shield! (+" .. result.amount .. " block)"
 
             elseif result.type == "buff" then
-                combatLog = "Wind Spirit grows stronger! (+" .. result.amount .. " strength)"
+                combatLog = eName .. " grows stronger! (+" .. result.amount .. " strength)"
+
+            elseif result.type == "draw_block" then
+                combatLog = eName .. " drew a tile and gained 10 block."
+
+            elseif result.type == "replace" then
+                combatLog = eName .. " swaps a tile! (+10 block)"
+
+            elseif result.type == "draw2" then
+                combatLog = eName .. " draws two tiles!"
 
             else -- "draw"
-                combatLog = "Enemy drew a tile."
+                combatLog = eName .. " drew a tile."
             end
 
             if not ITEM_FLAGS.retainBlock then playerBlock = 0 end
@@ -1684,17 +2087,17 @@ function love.keypressed(key)
             end
         end
 
-    elseif key == "c" and turnPhase == "player" and not mustDiscard then
+    elseif key == "c" and turnPhase == "player" and not mustDiscard and not scryMode then
         local claimed = claimDiscard()
         if claimed and burstDiscardMode and not gameOver and not encounterWon then
             processBurstDiscard()
         end
 
-    elseif key == "d" and turnPhase == "player" and not mustDiscard then
+    elseif key == "d" and turnPhase == "player" and not mustDiscard and not burstDiscardMode and not freeReplace.mode and not scryMode then
         claimableDiscard = nil
         tryDraw()
 
-    elseif key == "return" and currentSet and not mustDiscard then
+    elseif key == "return" and currentSet and not mustDiscard and not burstDiscardMode and not freeReplace.mode and not scryMode then
         playCurrentSet()
     end
 end

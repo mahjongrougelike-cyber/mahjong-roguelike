@@ -47,21 +47,50 @@ function M.draw(offer, ITEMS, playerItems, mode)
         shop      = "SHOP",
         reward    = "CHOOSE A REWARD",
         run_start = "CHOOSE YOUR STARTING ITEM",
+        jiangshi  = "JIANGSHI BARGAIN",
+        tianshi   = "HEAVEN'S GRACE",
     }
     local EXIT_LABELS = {
         shop      = "Leave",
         reward    = "Skip",
         run_start = "Skip",
+        jiangshi  = "Refuse",
+        tianshi   = "Depart",
     }
 
-    -- Dark overlay on top of the room
-    love.graphics.setColor(0, 0, 0, 0.82)
-    love.graphics.rectangle("fill", 0, 0, 1280, 720)
+    -- Dark overlay
+    if mode == "jiangshi" then
+        love.graphics.setColor(0.10, 0, 0, 0.88)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+        love.graphics.setColor(0.50, 0.04, 0.12, 0.28)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+    elseif mode == "tianshi" then
+        love.graphics.setColor(0.02, 0.02, 0.05, 0.88)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+        love.graphics.setColor(0.44, 0.38, 0.04, 0.18)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+    else
+        love.graphics.setColor(0, 0, 0, 0.82)
+        love.graphics.rectangle("fill", 0, 0, 1280, 720)
+    end
 
     -- Title
     love.graphics.setFont(FONT_TITLE)
-    love.graphics.setColor(0.92, 0.78, 0.22)
+    if mode == "jiangshi" then
+        love.graphics.setColor(0.90, 0.20, 0.30)
+    elseif mode == "tianshi" then
+        love.graphics.setColor(0.98, 0.88, 0.42)
+    else
+        love.graphics.setColor(0.92, 0.78, 0.22)
+    end
     love.graphics.printf(TITLES[mode] or "SHOP", 0, 60, 1280, "center")
+
+    -- Tianshi subtitle
+    if mode == "tianshi" then
+        love.graphics.setFont(FONT_SMALL)
+        love.graphics.setColor(0.72, 0.66, 0.40, 0.78)
+        love.graphics.printf("A blessing for your restraint — choose freely.", 0, 96, 1280, "center")
+    end
 
     -- Owned items summary
     if #playerItems > 0 then
@@ -117,6 +146,12 @@ function M.draw(offer, ITEMS, playerItems, mode)
         love.graphics.setFont(FONT_SMALL)
         love.graphics.setColor(0.78, 0.74, 0.60)
         love.graphics.printf(it.desc, ix + 10, CARD_Y + 52, CARD_W - 20, "left")
+
+        -- Cost (jiangshi items)
+        if it.cost_desc then
+            love.graphics.setColor(0.90, 0.22, 0.28, 0.90)
+            love.graphics.printf("Cost: " .. it.cost_desc, ix + 10, CARD_Y + CARD_H - 44, CARD_W - 20, "left")
+        end
 
         -- Source badge (bottom right)
         love.graphics.setColor(0.40, 0.38, 0.28)

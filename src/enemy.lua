@@ -51,6 +51,38 @@ local function buildWindSpiritIntent(e, intentType)
     end
 end
 
+-- ── Xi cycle intent builder ───────────────────────────────────────────────────
+
+local function buildXiIntent(e, intentType)
+    if intentType == "attack" then
+        if math.random() < 0.5 then
+            return { type = "attack_single", damage = 20 }
+        else
+            return { type = "attack_multi", hits = 4, damage = 2 }
+        end
+    else -- "draw"
+        return { type = "draw2" }
+    end
+end
+
+-- ── Gaunxi cycle intent builder ───────────────────────────────────────────────
+
+local function buildGaunxiIntent(e, intentType)
+    if intentType == "attack" then
+        if math.random() < 0.5 then
+            return { type = "attack_single", damage = 5 }
+        else
+            return { type = "attack_multi", hits = 5, damage = 1 }
+        end
+    elseif intentType == "burst" then
+        return { type = "burst", count = 3 }
+    elseif intentType == "replace" then
+        return { type = "replace" }
+    else -- "draw_block"
+        return { type = "draw_block", shield = 10 }
+    end
+end
+
 -- ── Enemy factories ───────────────────────────────────────────────────────────
 
 function createEnemy(name, hp, minAtk, maxAtk)
@@ -68,6 +100,49 @@ function createEnemy(name, hp, minAtk, maxAtk)
     }
     e.intent     = pickIntent(e, false)
     e.nextIntent = pickIntent(e, e.intent.type == "attack")
+    return e
+end
+
+function createXi()
+    local e = {
+        name          = "Xi",
+        hp            = 150,
+        maxHp         = 150,
+        hand          = {},
+        revealedMelds = {},
+        discards      = {},
+        minAtk        = 0,
+        maxAtk        = 0,
+        shield        = 0,
+        strength      = 0,
+        attackBonus   = 0,
+        cycle         = { "attack","attack","draw","attack","attack","draw","attack" },
+        cycleIndex    = 3,
+        buildIntent   = buildXiIntent,
+    }
+    e.intent     = buildXiIntent(e, e.cycle[1])
+    e.nextIntent = buildXiIntent(e, e.cycle[2])
+    return e
+end
+
+function createGaunxi()
+    local e = {
+        name          = "Gaunxi",
+        hp            = 70,
+        maxHp         = 70,
+        hand          = {},
+        revealedMelds = {},
+        discards      = {},
+        minAtk        = 0,
+        maxAtk        = 0,
+        shield        = 0,
+        strength      = 0,
+        cycle         = { "draw_block","attack","draw_block","burst","draw_block","replace","draw_block","attack" },
+        cycleIndex    = 3,
+        buildIntent   = buildGaunxiIntent,
+    }
+    e.intent     = buildGaunxiIntent(e, e.cycle[1])
+    e.nextIntent = buildGaunxiIntent(e, e.cycle[2])
     return e
 end
 
@@ -96,9 +171,11 @@ end
 -- ── Shared combat functions ───────────────────────────────────────────────────
 
 function enemyTakeDamage(enemy, amount)
-    local absorbed  = math.min(enemy.shield or 0, amount)
-    enemy.shield    = (enemy.shield or 0) - absorbed
-    enemy.hp        = math.max(0, enemy.hp - (amount - absorbed))
+    local absorbed   = math.min(enemy.shield or 0, amount)
+    enemy.shield     = (enemy.shield or 0) - absorbed
+    local actual     = amount - absorbed
+    enemy.hp         = math.max(0, enemy.hp - actual)
+    enemyDmgThisTurn = (enemyDmgThisTurn or 0) + actual
 end
 
 function enemyIsDead(enemy)
@@ -118,13 +195,17 @@ function enemyExecuteIntent(enemy, drawPile)
         amount   = 0,
     }
 
+    local bonus = enemy.attackBonus or 0
     if intent.type == "attack" then
-        result.damage = intent.damage
+        result.damage = intent.damage + bonus
+        if enemy.attackBonus ~= nil then enemy.attackBonus = 0 end
     elseif intent.type == "attack_single" then
-        result.damage = intent.damage
+        result.damage = intent.damage + bonus
+        if enemy.attackBonus ~= nil then enemy.attackBonus = 0 end
     elseif intent.type == "attack_multi" then
-        result.damage = intent.damage
+        result.damage = intent.damage + bonus
         result.hits   = intent.hits or 3
+        if enemy.attackBonus ~= nil then enemy.attackBonus = 0 end
     elseif intent.type == "buff" then
         enemy.strength = enemy.strength + (intent.amount or 2)
         result.amount  = intent.amount or 2
@@ -134,18 +215,36 @@ function enemyExecuteIntent(enemy, drawPile)
     elseif intent.type == "burst" then
         result.count = intent.count or 3
         -- tile drawing + discard handled in main.lua
+    elseif intent.type == "draw_block" then
+        if #drawPile > 0 then
+            table.insert(enemy.hand, table.remove(drawPile, 1))
+        end
+        enemy.shield = (enemy.shield or 0) + 10
+    elseif intent.type == "replace" then
+        -- Draw first (makes hand one over ready size); processBurstDiscard handles the discard
+        if #drawPile > 0 then
+            table.insert(enemy.hand, table.remove(drawPile, 1))
+            enemy.shield = (enemy.shield or 0) + 10
+        end
+    elseif intent.type == "draw2" then
+        for _ = 1, 2 do
+            if #drawPile > 0 then
+                table.insert(enemy.hand, table.remove(drawPile, 1))
+            end
+        end
     else -- "draw"
         if #drawPile > 0 then
             table.insert(enemy.hand, table.remove(drawPile, 1))
         end
     end
 
-    -- advance the intent queue
+    -- advance the intent queue (use per-enemy builder if set)
     if enemy.cycle then
         enemy.intent   = enemy.nextIntent
         local nextType = enemy.cycle[enemy.cycleIndex]
         enemy.cycleIndex = (enemy.cycleIndex % #enemy.cycle) + 1
-        enemy.nextIntent = buildWindSpiritIntent(enemy, nextType)
+        local builder = enemy.buildIntent or buildWindSpiritIntent
+        enemy.nextIntent = builder(enemy, nextType)
     else
         enemy.intent     = enemy.nextIntent
         enemy.nextIntent = pickIntent(enemy, enemy.intent.type == "attack")
@@ -232,15 +331,16 @@ local CTW, CTH, CTGAP = 26, 36, 3
 
 -- ── Intent rendering ──────────────────────────────────────────────────────────
 
-local function drawIntent(intent, x, y)
+local function drawIntent(intent, x, y, e)
     love.graphics.setFont(FONT_UI)
-    local t = intent.type
+    local t     = intent.type
+    local bonus = (e and e.attackBonus) or 0
     if t == "attack" or t == "attack_single" then
         love.graphics.setColor(0.90, 0.28, 0.25)
-        love.graphics.print("[ATK]  " .. intent.damage .. " dmg", x, y)
+        love.graphics.print("[ATK]  " .. (intent.damage + bonus) .. " dmg", x, y)
     elseif t == "attack_multi" then
         love.graphics.setColor(0.90, 0.28, 0.25)
-        love.graphics.print("[ATK]  " .. intent.hits .. "×" .. intent.damage .. " dmg", x, y)
+        love.graphics.print("[ATK]  " .. intent.hits .. "×" .. (intent.damage + bonus) .. " dmg", x, y)
     elseif t == "block" then
         love.graphics.setColor(0.30, 0.55, 0.92)
         love.graphics.print("[BLK]  +" .. (intent.amount or 0) .. " shield", x, y)
@@ -250,6 +350,15 @@ local function drawIntent(intent, x, y)
     elseif t == "buff" then
         love.graphics.setColor(0.78, 0.38, 0.92)
         love.graphics.print("[BUF]  +" .. (intent.amount or 0) .. " strength", x, y)
+    elseif t == "draw_block" then
+        love.graphics.setColor(0.30, 0.76, 0.46)
+        love.graphics.print("[DRW]  Draw + 10 block", x, y)
+    elseif t == "replace" then
+        love.graphics.setColor(0.46, 0.76, 0.68)
+        love.graphics.print("[REP]  Swap a tile", x, y)
+    elseif t == "draw2" then
+        love.graphics.setColor(0.30, 0.76, 0.46)
+        love.graphics.print("[DRW]  Draw 2 tiles", x, y)
     else
         love.graphics.setColor(0.30, 0.76, 0.46)
         love.graphics.print("[DRW]  Draw tile", x, y)
@@ -346,16 +455,24 @@ function drawEnemyPanel(enemy, hideHand, revealHand)
         ly = ly + 14
     end
 
+    -- Rage indicator (Xi: grows with player draws, resets on set play)
+    if (enemy.attackBonus or 0) > 0 then
+        love.graphics.setFont(FONT_SMALL)
+        love.graphics.setColor(0.92, 0.44, 0.18, 0.90)
+        love.graphics.print("Rage  +" .. enemy.attackBonus .. " ATK", lx, ly)
+        ly = ly + 14
+    end
+
     -- Intents
     love.graphics.setFont(FONT_SMALL)
     love.graphics.setColor(0.58, 0.58, 0.58)
     love.graphics.print("Intent:", lx, ly)
-    drawIntent(enemy.intent, lx + 56, ly)
+    drawIntent(enemy.intent, lx + 56, ly, enemy)
     ly = ly + 18
 
     love.graphics.setColor(0.36, 0.36, 0.36)
     love.graphics.print("Next:", lx, ly)
-    drawIntent(enemy.nextIntent, lx + 40, ly)
+    drawIntent(enemy.nextIntent, lx + 40, ly, enemy)
 
     -- Face-down hand
     if hideHand or enemyIsDead(enemy) then return end

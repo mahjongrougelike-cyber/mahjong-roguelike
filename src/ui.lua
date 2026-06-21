@@ -10,26 +10,20 @@ function drawRoom()
     love.graphics.setColor(0.08, 0.09, 0.11)   -- clean dark charcoal-navy
     love.graphics.rectangle("fill", 0, 0, 1280, 720)
 
-    -- ── Mahogany table border ─────────────────────────────────────────────────
+    -- ── Mahogany table border (full bleed) ───────────────────────────────────
     love.graphics.setColor(0.30, 0.18, 0.09)
-    love.graphics.rectangle("fill", 50, 40, 1180, 662, 12, 12)
+    love.graphics.rectangle("fill", 0, 0, 1280, 720)
 
     -- Subtle grain bands (3 horizontal sweeps)
     for i, alpha in ipairs({0.10, 0.07, 0.05}) do
         love.graphics.setColor(0.40, 0.24, 0.11, alpha)
-        love.graphics.rectangle("fill", 52, 40 + i * 185, 1176, 58, 4, 4)
+        love.graphics.rectangle("fill", 0, i * 185, 1280, 58)
     end
 
-    -- Clean top edge highlight
-    love.graphics.setColor(0.48, 0.30, 0.14, 0.55)
-    love.graphics.setLineWidth(2)
-    love.graphics.rectangle("line", 50, 40, 1180, 662, 12, 12)
-    love.graphics.setLineWidth(1)
-
-    -- ── Casino felt ───────────────────────────────────────────────────────────
-    local FX, FY, FW, FH = 86, 76, 1108, 588
-    love.graphics.setColor(0.14, 0.38, 0.18)   -- clean vivid casino green
-    love.graphics.rectangle("fill", FX, FY, FW, FH, 8, 8)
+    -- ── Casino felt (full bleed, thin mahogany border only) ──────────────────
+    local FX, FY, FW, FH = 10, 10, 1260, 700
+    love.graphics.setColor(0.14, 0.38, 0.18)
+    love.graphics.rectangle("fill", FX, FY, FW, FH)
 
     -- Woven diagonal grain (very subtle — just texture, not mood)
     love.graphics.setColor(0.17, 0.44, 0.21, 0.07)
@@ -45,10 +39,6 @@ function drawRoom()
     end
     love.graphics.setLineWidth(1)
 
-    -- Wall guide (subtle inset)
-    love.graphics.setColor(0.20, 0.50, 0.24, 0.22)
-    love.graphics.rectangle("line", 442, 217, 276, 276, 5, 5)
-
     -- Corner diamond emblems
     love.graphics.setColor(0.22, 0.54, 0.26, 0.40)
     for _, co in ipairs({
@@ -59,12 +49,6 @@ function drawRoom()
         love.graphics.polygon("line",
             co[1], co[2]-s, co[1]+s, co[2], co[1], co[2]+s, co[1]-s, co[2])
     end
-
-    -- Felt border (clean single line)
-    love.graphics.setColor(0.22, 0.56, 0.26, 0.70)
-    love.graphics.setLineWidth(2)
-    love.graphics.rectangle("line", FX, FY, FW, FH, 8, 8)
-    love.graphics.setLineWidth(1)
 end
 
 -- ── Lighting ──────────────────────────────────────────────────────────────────

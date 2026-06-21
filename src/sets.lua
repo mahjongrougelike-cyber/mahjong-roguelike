@@ -2,6 +2,7 @@ require("src/tiles")
 
 -- Set type multipliers
 local TYPE_MULT = {
+    single = 1,
     pair = 1,
     chow = 1.5,
     pung = 3,
@@ -115,8 +116,8 @@ end
 -- Returns: { attack, block, mana, skipTurn, pickStatValue }
 function calculateEffect(setInfo)
     local tiles     = setInfo.tiles
-    local typeMult  = TYPE_MULT[setInfo.type]
-    local matchMult = setInfo.pure and 2 or 1
+    local typeMult  = TYPE_MULT[setInfo.type] or 1
+    local matchMult = (setInfo.type == "single") and 1 or (setInfo.pure and 2 or 1)
 
     local sum = 0
     for _, t in ipairs(tiles) do sum = sum + t.value end
@@ -124,6 +125,11 @@ function calculateEffect(setInfo)
     local total  = math.floor(sum * typeMult * matchMult)
     local effect = { attack = 0, block = 0, mana = 0, skipTurn = false, freeDraws = 0,
                      damageMultiplier = 1, blockMultiplier = 1, manaMultiplier = 1 }
+
+    if setInfo.type == "single" then
+        applySuitEffect(effect, tiles[1].suit, tiles[1].value or 0)
+        return effect
+    end
 
     if setInfo.pure then
         local suit = tiles[1].suit
@@ -375,6 +381,7 @@ end
 -- flags mirrors ITEM_FLAGS; pairs and mixed sets are gated behind their respective flags.
 function canClaimTile(tile, hand, flags)
     flags = flags or {}
+    if flags.singlePlay then return true end
     local isHonor = not NUMBERED[tile.suit]
 
     -- Collect hand tiles that share identity with the claimed tile
@@ -440,7 +447,12 @@ end
 
 -- Build a readable summary string for a set's effect
 function effectToString(setInfo, effect)
-    local setLabel = (setInfo.pure and "Pure " or "Mixed ") .. setInfo.type:upper()
+    local setLabel
+    if setInfo.type == "single" or setInfo.type == "winter" then
+        setLabel = setInfo.type:upper()
+    else
+        setLabel = (setInfo.pure and "Pure " or "Mixed ") .. setInfo.type:upper()
+    end
     local parts    = {}
     if effect.attack > 0                       then table.insert(parts, "ATK "  .. effect.attack) end
     if effect.block  > 0                       then table.insert(parts, "BLK "  .. effect.block)  end
